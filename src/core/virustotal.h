@@ -6,7 +6,7 @@
 /*
  * Query VirusTotal for a SHA-256 hash.
  * API key from config (vt_api_key) or VT_API_KEY env var.
- * Rate-limited (default 4 req/min) with local cache in temp dir.
+ * Rate-limited (default 4 req/min) with an in-memory cache.
  * On any failure: sets out->virustotal_hits = -1, returns false.
  * offline/disabled: returns false immediately without network.
  */
