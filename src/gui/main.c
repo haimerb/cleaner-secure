@@ -876,16 +876,8 @@ static void ui_stop_worker(HWND hwnd)
 
 static void ui_set_scanning(bool scanning)
 {
-    HWND buttons[] = {
-        g.btn_scan, g.btn_kill, g.btn_suspend, g.btn_resume,
-        g.btn_block_ip, g.btn_unblock_ip
-    };
-    size_t i;
-
-    for (i = 0; i < sizeof(buttons) / sizeof(buttons[0]); i++) {
-        if (buttons[i] != NULL) {
-            (void)EnableWindow(buttons[i], !scanning);
-        }
+    if (g.btn_scan != NULL) {
+        (void)EnableWindow(g.btn_scan, !scanning);
     }
     if (g.progress != NULL) {
         (void)SendMessageW(g.progress, PBM_SETPOS, scanning ? 0 : 100, 0);
@@ -899,7 +891,9 @@ static void ui_set_scanning(bool scanning)
 static void ui_request_scan(bool vt_live)
 {
     if (g.scan_event == NULL ||
-        InterlockedCompareExchange(&g.shutdown, 0, 0) != 0) {
+        InterlockedCompareExchange(&g.shutdown, 0, 0) != 0 ||
+        InterlockedCompareExchange(&g.scan_busy, 0, 0) != 0 ||
+        InterlockedCompareExchange(&g.scan_pending, 0, 0) != 0) {
         return;
     }
     if (vt_live) {
