@@ -14,8 +14,22 @@
 
 const char *test_response_denylist(void)
 {
+    wchar_t path[CC_MAX_PATH_LEN];
+    wchar_t *base;
+    DWORD len = sizeof(path) / sizeof(path[0]);
     DWORD err = 0;
 
+    if (QueryFullProcessImageNameW(GetCurrentProcess(), 0, path, &len)) {
+        base = wcsrchr(path, L'\\');
+        base = base != NULL ? base + 1 : path;
+        if (!cc_process_matches_name(GetCurrentProcessId(), base, &err)) {
+            return "self image name should match current process";
+        }
+    }
+    if (cc_process_matches_name(GetCurrentProcessId(),
+                                L"__no_such_process__.exe", &err)) {
+        return "different image name should not match current process";
+    }
     if (cc_kill_process(0, &err)) {
         return "pid 0 should be denied";
     }

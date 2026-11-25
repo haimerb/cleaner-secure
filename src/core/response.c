@@ -97,21 +97,15 @@ static bool cc_response_fail(DWORD *err, DWORD code)
     return false;
 }
 
-static bool cc_pid_allowed(uint32_t pid, DWORD *err)
+static bool cc_pid_image_base(uint32_t pid, wchar_t *base, size_t cap, DWORD *err)
 {
-    static const wchar_t *const deny[] = {
-        L"csrss.exe", L"wininit.exe", L"winlogon.exe", L"services.exe",
-        L"lsass.exe", L"smss.exe", L"system", L"registry",
-        L"cleaner-secure.exe", L"cleaner-secure-cli.exe"
-    };
     wchar_t path[CC_MAX_PATH_LEN];
     DWORD len = CC_MAX_PATH_LEN;
-    const wchar_t *base;
+    wchar_t *slash;
     HANDLE proc;
-    DWORD i;
 
-    if (pid == 0 || pid == 4 || pid == GetCurrentProcessId()) {
-        return cc_response_fail(err, ERROR_INVALID_PARAMETER);
+    if (cap == 0) {
+        return cc_response_fail(err, ERROR_INSUFFICIENT_BUFFER);
     }
     proc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, (DWORD)pid);
     if (proc == NULL) {
@@ -123,14 +117,50 @@ static bool cc_pid_allowed(uint32_t pid, DWORD *err)
         return cc_response_fail(err, code);
     }
     CloseHandle(proc);
-    base = wcsrchr(path, L'\\');
-    base = base != NULL ? base + 1 : path;
+    slash = wcsrchr(path, L'\\');
+    wcsncpy(base, slash != NULL ? slash + 1 : path, cap - 1);
+    base[cap - 1] = L'\0';
+    return true;
+}
+
+static bool cc_pid_allowed(uint32_t pid, DWORD *err)
+{
+    static const wchar_t *const deny[] = {
+        L"csrss.exe", L"wininit.exe", L"winlogon.exe", L"services.exe",
+        L"lsass.exe", L"smss.exe", L"system", L"registry",
+        L"cleaner-secure.exe", L"cleaner-secure-cli.exe"
+    };
+    wchar_t base[CC_MAX_NAME];
+    DWORD i;
+
+    if (pid == 0 || pid == 4 || pid == GetCurrentProcessId()) {
+        return cc_response_fail(err, ERROR_INVALID_PARAMETER);
+    }
+    if (!cc_pid_image_base(pid, base, sizeof(base) / sizeof(base[0]), err)) {
+        return false;
+    }
     for (i = 0; i < sizeof(deny) / sizeof(deny[0]); i++) {
         if (_wcsicmp(base, deny[i]) == 0) {
             return cc_response_fail(err, ERROR_ACCESS_DENIED);
         }
     }
     return true;
+}
+
+bool cc_process_matches_name(uint32_t pid, const wchar_t *name, DWORD *err)
+{
+    wchar_t base[CC_MAX_NAME];
+    const wchar_t *wanted;
+
+    if (name == NULL || name[0] == L'\0') {
+        return cc_response_fail(err, ERROR_INVALID_PARAMETER);
+    }
+    if (!cc_pid_image_base(pid, base, sizeof(base) / sizeof(base[0]), err)) {
+        return false;
+    }
+    wanted = wcsrchr(name, L'\\');
+    wanted = wanted != NULL ? wanted + 1 : name;
+    return _wcsicmp(base, wanted) == 0;
 }
 
 static bool cc_service_allowed(const wchar_t *name, DWORD *err)

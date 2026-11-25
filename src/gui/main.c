@@ -510,6 +510,14 @@ static void ui_request_scan(bool vt_live)
     }
 }
 
+static void ui_stale_process(void)
+{
+    MessageBoxW(NULL, L"El proceso ya no está disponible o cambió de "
+                      L"estado. Se actualizará el análisis.",
+                L"Terminar", MB_OK | MB_ICONINFORMATION);
+    ui_request_scan(false);
+}
+
 static void ui_apply_scan_result(ui_scan_result_t *result)
 {
     if (result == NULL) {
@@ -609,6 +617,12 @@ static void ui_action(int command)
         }
         switch (command) {
         case ID_BTN_KILL:
+            if (!cc_process_matches_name(g.rows[selected].alert.pid,
+                                         g.rows[selected].alert.target,
+                                         &error_code)) {
+                ui_stale_process();
+                return;
+            }
             ok = cc_kill_process(g.rows[selected].alert.pid, &error_code);
             wcscpy(action, L"Terminar");
             break;
@@ -624,11 +638,22 @@ static void ui_action(int command)
             return;
         }
     }
+    if (!ok && command == ID_BTN_KILL &&
+        (error_code == ERROR_GEN_FAILURE ||
+         error_code == ERROR_INVALID_PARAMETER ||
+         error_code == ERROR_NOT_FOUND)) {
+        ui_stale_process();
+        return;
+    }
     if (!ok) {
         wchar_t err_text[256];
         ui_error_text(error_code, err_text,
                       sizeof(err_text) / sizeof(err_text[0]));
         MessageBoxW(NULL, err_text, action, MB_OK | MB_ICONERROR);
+        return;
+    }
+    if (command == ID_BTN_KILL) {
+        ui_request_scan(false);
     }
 }
 
