@@ -67,6 +67,7 @@ typedef struct {
     char      category[32];    /* "resource"|"ioc"|"anomaly"|"signature"|"registry"|"eventlog" */
     char      reason[CC_MAX_REASON];
     wchar_t   target[CC_MAX_NAME]; /* process/service/registry key name */
+    wchar_t   indicator[64];
     uint32_t  pid;
 } cc_alert_t;
 

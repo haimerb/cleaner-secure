@@ -14,7 +14,10 @@ int  cc_ioc_count(const cc_ioc_t *ioc);
 bool cc_ioc_match_proc(const cc_ioc_t *ioc, const wchar_t *name,
                        const wchar_t *path, const char *sha256);
 bool cc_ioc_match_service(const cc_ioc_t *ioc, const wchar_t *service_name,
-                          const wchar_t *service_path);
+                           const wchar_t *service_path);
+bool cc_ioc_is_malicious_ipv4(const cc_ioc_t *ioc, uint32_t addr);
+bool cc_ioc_is_suspicious_port(const cc_ioc_t *ioc, uint16_t port);
+
 
 /* Publisher allowlist: trusted publisher CNs (from publishers.json). */
 typedef struct cc_publishers_s cc_publishers_t;

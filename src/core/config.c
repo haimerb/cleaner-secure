@@ -202,6 +202,21 @@ static void cc_load_thresholds(cc_config_t *out, const wchar_t *dir)
     static const char *const k_scan_timeout[] = {
         "scan_timeout_ms", "scan_timeout", "scan_timeout_seconds"
     };
+    static const char *const k_network_enabled[] = { "network_enabled" };
+    static const char *const k_net_conns[] = {
+        "network_max_conns_per_pid", "network_max_conns"
+    };
+    static const char *const k_net_ips[] = {
+        "network_max_unique_ips_per_pid", "network_max_unique_ips"
+    };
+    static const char *const k_net_ports[] = {
+        "network_max_listen_ports_per_pid", "network_max_listen_ports"
+    };
+    static const char *const k_net_vt[] = { "network_vt_enabled" };
+    static const char *const k_net_vt_max[] = {
+        "network_vt_max_lookups", "network_vt_lookups"
+    };
+    static const char *const k_vt_auto[] = { "vt_auto_lookup" };
     wchar_t path[CC_MAX_PATH_LEN];
     cc_json_t *j;
 
@@ -217,7 +232,14 @@ static void cc_load_thresholds(cc_config_t *out, const wchar_t *dir)
     (void)cc_cfg_u64(j, k_ram, 4, &out->ram_bytes_threshold);
     (void)cc_cfg_u32(j, k_handles, 3, &out->handle_threshold);
     (void)cc_cfg_u64(j, k_io, 4, &out->io_bytes_threshold);
+    (void)cc_cfg_bool(j, k_network_enabled, 1, &out->network_enabled);
+    (void)cc_cfg_u32(j, k_net_conns, 2, &out->network_max_conns_per_pid);
+    (void)cc_cfg_u32(j, k_net_ips, 2, &out->network_max_unique_ips_per_pid);
+    (void)cc_cfg_u32(j, k_net_ports, 2, &out->network_max_listen_ports_per_pid);
+    (void)cc_cfg_bool(j, k_net_vt, 1, &out->network_vt_enabled);
+    (void)cc_cfg_u32(j, k_net_vt_max, 2, &out->network_vt_max_lookups);
     (void)cc_cfg_bool(j, k_vt_enabled, 1, &out->vt_enabled);
+    (void)cc_cfg_bool(j, k_vt_auto, 1, &out->vt_auto_lookup);
     (void)cc_cfg_u32(j, k_vt_rpm, 3, &out->vt_requests_per_minute);
     {
         double scan_timeout = 0.0;
@@ -276,7 +298,14 @@ bool cc_config_load(cc_config_t *out, const wchar_t *config_dir)
     out->ram_bytes_threshold = 1610612736ULL;
     out->handle_threshold = 4000;
     out->io_bytes_threshold = 524288000ULL;
+    out->network_enabled = true;
+    out->network_max_conns_per_pid = 500;
+    out->network_max_unique_ips_per_pid = 100;
+    out->network_max_listen_ports_per_pid = 25;
+    out->network_vt_enabled = false;
+    out->network_vt_max_lookups = 8;
     out->vt_enabled = true;
+    out->vt_auto_lookup = false;
     out->vt_requests_per_minute = 4;
     out->scan_timeout_ms = 60000;
 

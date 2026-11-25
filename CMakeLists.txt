@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(cleaner-secure C)
+project(cleaner-secure C RC)
 
 set(CMAKE_C_STANDARD 17)
 set(CMAKE_C_STANDARD_REQUIRED ON)
@@ -23,6 +23,7 @@ add_library(cleaner_secure_core STATIC
   src/core/registry_scan.c
   src/core/eventlog_scan.c
   src/core/detect.c
+  src/core/network_scan.c
   src/core/response.c
 )
 
@@ -34,6 +35,7 @@ target_link_libraries(cleaner_secure_core PUBLIC
   wintrust
   bcrypt
   ws2_32
+  iphlpapi
   winhttp
   ole32
   shell32
@@ -47,7 +49,12 @@ target_link_libraries(cleaner-secure-cli PRIVATE cleaner_secure_core)
 target_link_options(cleaner-secure-cli PRIVATE -Wl,--dynamicbase,--nxcompat,--high-entropy-va)
 
 # --- GUI (Win32) ---
-add_executable(cleaner-secure WIN32 src/gui/main.c)
+file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}/assets/logo.ico" CC_GUI_ICON)
+file(TO_CMAKE_PATH "${CMAKE_SOURCE_DIR}/src/gui/app.manifest" CC_GUI_MANIFEST)
+configure_file(src/gui/cleaner-secure.rc.in
+  ${CMAKE_CURRENT_BINARY_DIR}/cleaner-secure.rc @ONLY)
+add_executable(cleaner-secure WIN32 src/gui/main.c
+  ${CMAKE_CURRENT_BINARY_DIR}/cleaner-secure.rc)
 target_link_libraries(cleaner-secure PRIVATE cleaner_secure_core comctl32)
 target_link_options(cleaner-secure PRIVATE -Wl,--dynamicbase,--nxcompat,--high-entropy-va)
 
