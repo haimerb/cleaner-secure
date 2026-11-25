@@ -1,0 +1,24 @@
+# Local secrets — never commit
+config/local.json
+*.local.json
+
+# Build
+build/
+cmake-build-*/
+out/
+*.obj
+*.o
+*.exe
+*.pdb
+*.ilk
+*.lib
+*.a
+
+# IDE
+.vs/
+.vscode/
+.idea/
+compile_commands.json
+
+# Logs
+*.log
