@@ -6,6 +6,7 @@
 /* All return true on success. On failure sets *err (system message). */
 
 bool cc_kill_process(uint32_t pid, DWORD *err);
+bool cc_process_matches_name(uint32_t pid, const wchar_t *name, DWORD *err);
 bool cc_suspend_process(uint32_t pid, DWORD *err);
 bool cc_resume_process(uint32_t pid, DWORD *err);
 
