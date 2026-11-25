@@ -262,6 +262,11 @@ int cc_ioc_count(const cc_ioc_t *ioc)
            ioc->svc_path_subs_n + ioc->malicious_ipv4_n + ioc->suspicious_ports_n + ioc->parents_n;
 }
 
+bool cc_ioc_has_hashes(const cc_ioc_t *ioc)
+{
+    return ioc != NULL && ioc->hashes_n > 0;
+}
+
 bool cc_ioc_match_proc(const cc_ioc_t *ioc, const wchar_t *name, const wchar_t *path, const char *sha256)
 {
     int i;

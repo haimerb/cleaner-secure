@@ -49,8 +49,12 @@ CLI:
 ./cleaner-secure-cli.exe --once
 ./cleaner-secure-cli.exe --interval 2
 ./cleaner-secure-cli.exe --json --once
+./cleaner-secure-cli.exe --list-processes
+./cleaner-secure-cli.exe --json --list-processes
 ./cleaner-secure-cli.exe --help
 ```
+
+`--list-processes` imprime un inventario de procesos con PID, padre, usuario, sesión, integridad, CPU, RAM y ruta. Con `--json`, la salida incluye `processes.items[]`; un scan `--json --once` también incluye ese inventario junto a `alerts[]`.
 
 Response actions (se ejecutan antes de cargar la configuración):
 
@@ -70,7 +74,7 @@ GUI:
 ./cleaner-secure.exe
 ```
 
-La GUI muestra alertas ordenadas por score. `Analizar ahora` permite lookup live de VT con cap; el auto-refresco usa solo cache para no saturar el free tier ni bloquear la UI.
+La GUI tiene dos pestañas: `Alertas` (score, riesgo, categoría, PID/proceso, CPU/RAM) y `Procesos` (PID, usuario, sesión, padre, integridad, CPU/RAM y ruta). Ambas soportan búsqueda, filtro y orden por columna; doble clic abre el detalle. La barra de estado muestra alertas, críticas, altas, procesos listados/analizados y última actualización. `Analizar ahora` permite lookup live de VT con cap; el auto-refresco usa solo cache para no saturar el free tier ni bloquear la UI. Las acciones peligrosas (kill, suspend, resume, firewall) requieren confirmación explícita y se auditan en `actions.log`.
 
 ## Test
 

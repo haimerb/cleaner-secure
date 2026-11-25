@@ -9,6 +9,7 @@ typedef struct cc_ioc_s cc_ioc_t;
 cc_ioc_t *cc_ioc_load(const wchar_t *path); /* NULL on failure; file optional */
 void cc_ioc_free(cc_ioc_t *ioc);
 int  cc_ioc_count(const cc_ioc_t *ioc);
+bool cc_ioc_has_hashes(const cc_ioc_t *ioc);
 
 /* Match helpers: return true on hit (case-insensitive). */
 bool cc_ioc_match_proc(const cc_ioc_t *ioc, const wchar_t *name,

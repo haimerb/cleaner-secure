@@ -6,6 +6,8 @@ extern const char *test_json_utf8(void);
 extern const char *test_ioc_load_match(void);
 extern const char *test_ioc_publishers(void);
 extern const char *test_ioc_network(void);
+extern const char *test_ioc_hash_helper(void);
+extern const char *test_proc_inventory(void);
 extern const char *test_response_denylist(void);
 extern const char *test_response_ip_denylist(void);
 extern const char *test_config_defaults(void);
@@ -47,6 +49,8 @@ int main(void)
     failed += run_one("test_ioc_load_match", test_ioc_load_match);
     failed += run_one("test_ioc_publishers", test_ioc_publishers);
     failed += run_one("test_ioc_network", test_ioc_network);
+    failed += run_one("test_ioc_hash_helper", test_ioc_hash_helper);
+    failed += run_one("test_proc_inventory", test_proc_inventory);
     failed += run_one("test_response_denylist", test_response_denylist);
     failed += run_one("test_response_ip_denylist", test_response_ip_denylist);
     failed += run_one("test_config_defaults", test_config_defaults);

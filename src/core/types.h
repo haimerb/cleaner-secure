@@ -21,15 +21,31 @@ typedef enum {
     CC_RISK_CRITICAL
 } cc_risk_t;
 
+typedef enum {
+    CC_IL_UNKNOWN = 0,
+    CC_IL_LOW,
+    CC_IL_MEDIUM,
+    CC_IL_HIGH,
+    CC_IL_SYSTEM,
+    CC_IL_PROTECTED
+} cc_integrity_t;
+
 typedef struct {
     uint32_t pid;
     uint32_t parent_pid;
     wchar_t  name[CC_MAX_NAME];
     wchar_t  path[CC_MAX_PATH_LEN];
     wchar_t  publisher[CC_MAX_PUBLISHER];
+    wchar_t  user[CC_MAX_NAME];
+    wchar_t  command_line[CC_MAX_PATH_LEN];
+    uint32_t session_id;
     uint64_t create_time;
+    cc_integrity_t integrity;
     bool     is_hidden;
     bool     is_elevated;
+    bool     is_wow64;
+    bool     bitness_known;
+    bool     user_known;
 } cc_proc_info_t;
 
 typedef struct {
@@ -41,6 +57,11 @@ typedef struct {
     uint64_t io_read_bytes;
     uint64_t io_write_bytes;
 } cc_proc_metrics_t;
+
+typedef struct {
+    cc_proc_info_t info;
+    cc_proc_metrics_t metrics;
+} cc_process_view_t;
 
 typedef struct {
     wchar_t  name[CC_MAX_NAME];
