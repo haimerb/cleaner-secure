@@ -424,12 +424,12 @@ static void ui_action(int command)
                                  LVNI_SELECTED);
     if (selected < 0 || selected >= g.row_count) {
         MessageBoxW(NULL, L"Seleccione una alerta de la lista.",
-                    L"Cleaner-C", MB_OK | MB_ICONINFORMATION);
+                    L"cleaner-secure", MB_OK | MB_ICONINFORMATION);
         return;
     }
     if (g.rows[selected].alert.pid == 0) {
         MessageBoxW(NULL, L"La alerta seleccionada no tiene PID.",
-                    L"Cleaner-C", MB_OK | MB_ICONINFORMATION);
+                    L"cleaner-secure", MB_OK | MB_ICONINFORMATION);
         return;
     }
 
@@ -748,7 +748,7 @@ static LRESULT CALLBACK ui_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam,
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
                    LPSTR lpCmdLine, int nCmdShow)
 {
-    static const wchar_t *const class_name = L"CleanerC";
+    static const wchar_t *const class_name = L"CleanerSecureWindow";
     WNDCLASSEXW wc;
     HWND hwnd;
     MSG msg;
@@ -790,7 +790,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         y = 0;
     }
     hwnd = CreateWindowExW(0, class_name,
-                           L"Cleaner-C — Monitor de procesos y servicios",
+                           L"cleaner-secure — Monitor de procesos y servicios",
                            WS_OVERLAPPEDWINDOW, x, y, 1100, 700, NULL, NULL,
                            hInstance, NULL);
     if (hwnd == NULL) {

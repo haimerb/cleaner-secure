@@ -669,10 +669,10 @@ static int cc_main_wide(int argc, wchar_t **argv)
     int rc;
 
     (void)SetConsoleOutputCP(CP_UTF8);
-    cc_wide_to_utf8(argc > 0 && argv[0] != NULL ? argv[0] : L"cleaner-c-cli",
+    cc_wide_to_utf8(argc > 0 && argv[0] != NULL ? argv[0] : L"cleaner-secure-cli",
                     prog, sizeof(prog));
     if (prog[0] == '\0') {
-        (void)strcpy(prog, "cleaner-c-cli");
+        (void)strcpy(prog, "cleaner-secure-cli");
     }
     cc_options_init(&opts);
     if (!cc_parse_args(argc, argv, &opts, &help, prog)) {
