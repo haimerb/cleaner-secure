@@ -14,7 +14,7 @@
 - **Response actions** manuales: kill, suspend, resume, service stop/start, block IP y unblock IP.
 - **Audit log** local en `%LOCALAPPDATA%\cleaner-secure\actions.log`.
 
-La detección de red es IPv4. El bloqueo valida IPv4 e IPv6, pero las reglas se crean para direcciones IPv4 remotas.
+La detección de red es IPv4. El bloqueo valida IPv4 e IPv6 y usa la dirección canonizada en las reglas IN/OUT; se deniegan loopback, privadas, multicast y CGNAT.
 
 ## Requisitos
 
@@ -49,6 +49,7 @@ CLI:
 ./cleaner-secure-cli.exe --once
 ./cleaner-secure-cli.exe --interval 2
 ./cleaner-secure-cli.exe --json --once
+./cleaner-secure-cli.exe --help
 ```
 
 Response actions (se ejecutan antes de cargar la configuración):
@@ -89,13 +90,13 @@ El test binary no tiene filtros: `tests/test_main.c` registra todas las suites.
 
 Archivos no secretos:
 
-- `config/iocs.json`: `process_names`, `path_substrings`, `hashes_sha256`, `service_names`, `service_path_substrings`, `malicious_ips`, `suspicious_ports`.
+- `config/iocs.json`: `process_names`, `path_substrings`, `hashes_sha256`, `service_names`, `service_path_substrings`, `suspicious_parents`, `malicious_ips`, `suspicious_ports`.
 - `config/publishers.json`: `trusted_publishers`.
 - `config/thresholds.json`: umbrales de recursos, `scan_interval_seconds`, `eventlog_window_minutes`, `scan_timeout_ms`, ajustes de red y VT.
 
 Secreto local:
 
-- `config/local.json`: `vt_api_key` o `api_key`.Tiene prioridad sobre la variable de entorno `VT_API_KEY`.
+- `config/local.json`: `vt_api_key` o `api_key`. Tiene prioridad sobre la variable de entorno `VT_API_KEY`.
 - El archivo está en `.gitignore`; no commitear ni copiar al directorio de build.
 
 Claves relevantes de red en `thresholds.json`:
