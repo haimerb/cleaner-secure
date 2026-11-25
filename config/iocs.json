@@ -1,0 +1,36 @@
+{
+  "process_names": [
+    "xmrig.exe", "minerd.exe", "cpuminer.exe", "kdevtmpfsi", "kinsing",
+    "cryptolocker.exe", "wannacry.exe", "wncry.exe", "locky.exe", "cerber.exe",
+    "ryuk.exe", "conti.exe", "revil.exe", "maze.exe", "darkside.exe",
+    "emotet.exe", "trickbot.exe", "qakbot.exe", "cobaltstrike.exe",
+    "mimikatz.exe", "procdump64.exe", "psexesvc.exe", "powershell.exe.hidden",
+    "svchost32.exe", "csrss32.exe", "lsass32.exe", "runtimebroker32.exe",
+    "setup32.exe", "taskhostw32.exe", "sc.exe.helper"
+  ],
+  "path_substrings": [
+    "\\appdata\\local\\temp\\",
+    "\\windows\\temp\\",
+    "\\users\\public\\",
+    "\\$recycle.bin\\",
+    "\\windows\\tasks\\"
+  ],
+  "hashes_sha256": [],
+  "service_names": [
+    "winupdate32", "sysupdater", "cryptsvc32", "wscsvc_protect",
+    "medicinesvc", "googleupdate32", "adobeflashupdate"
+  ],
+  "service_path_substrings": [
+    "\\appdata\\",
+    "\\temp\\",
+    "\\users\\public\\"
+  ],
+  "suspicious_parents": {
+    "winword.exe": ["cmd.exe", "powershell.exe", "wscript.exe", "cscript.exe"],
+    "excel.exe": ["cmd.exe", "powershell.exe", "wscript.exe"],
+    "powerpnt.exe": ["cmd.exe", "powershell.exe"],
+    "outlook.exe": ["powershell.exe", "wscript.exe", "cmd.exe"],
+    "acrord32.exe": ["cmd.exe", "powershell.exe"],
+    "mshta.exe": ["powershell.exe", "cmd.exe"]
+  }
+}

@@ -1,0 +1,12 @@
+{
+  "cpu_percent_threshold": 80.0,
+  "cpu_sustain_seconds": 10,
+  "ram_bytes_threshold": 1610612736,
+  "handle_threshold": 4000,
+  "io_bytes_threshold": 524288000,
+  "vt_enabled": true,
+  "vt_requests_per_minute": 4,
+  "scan_timeout_ms": 60000,
+  "eventlog_window_minutes": 60,
+  "scan_interval_seconds": 2
+}

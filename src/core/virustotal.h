@@ -1,0 +1,21 @@
+#ifndef CC_VIRUSTOTAL_H
+#define CC_VIRUSTOTAL_H
+
+#include "types.h"
+
+/*
+ * Query VirusTotal for a SHA-256 hash.
+ * API key from config (vt_api_key) or VT_API_KEY env var.
+ * Rate-limited (default 4 req/min) with local cache in temp dir.
+ * On any failure: sets out->virustotal_hits = -1, returns false.
+ * offline/disabled: returns false immediately without network.
+ */
+bool cc_virustotal_lookup(const char *sha256, cc_trust_result_t *out);
+
+/* Configure key + rate limit (called from cc_config_load). */
+void cc_virustotal_configure(const char *api_key, int requests_per_minute);
+
+/* Flush/reset cache. */
+void cc_virustotal_reset(void);
+
+#endif /* CC_VIRUSTOTAL_H */
