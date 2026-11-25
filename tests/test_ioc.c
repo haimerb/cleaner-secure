@@ -1,4 +1,5 @@
 #include "ioc.h"
+#include "proc.h"
 
 #include <winsock2.h>
 #include <ws2tcpip.h>
@@ -77,6 +78,54 @@ const char *test_ioc_load_match(void)
     ASSERT_TRUE(!cc_ioc_match_service(ioc, L"Spooler", L""), "false match on Spooler");
 
     cc_ioc_free(ioc);
+    return NULL;
+}
+
+const char *test_ioc_hash_helper(void)
+{
+    static const char *hash =
+        "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+    wchar_t path[CC_MAX_PATH_LEN];
+    cc_ioc_t *ioc;
+
+    ASSERT_TRUE(write_temp_file(L"cc_test_iocs_hash.json", path,
+                                CC_MAX_PATH_LEN,
+        "{\"hashes_sha256\":[\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\"]}"),
+        "create temp hash iocs.json");
+    ioc = cc_ioc_load(path);
+    DeleteFileW(path);
+    ASSERT_TRUE(ioc != NULL, "cc_ioc_load returned NULL for hash IOC");
+    ASSERT_TRUE(cc_ioc_has_hashes(ioc), "hash IOC not detected");
+    ASSERT_TRUE(cc_ioc_match_proc(ioc, L"", L"", hash),
+                "hash IOC did not match");
+    cc_ioc_free(ioc);
+
+    ASSERT_TRUE(write_temp_file(L"cc_test_iocs_nohash.json", path,
+                                CC_MAX_PATH_LEN,
+        "{\"hashes_sha256\":[],\"process_names\":[\"cmd.exe\"]}"),
+        "create temp no-hash iocs.json");
+    ioc = cc_ioc_load(path);
+    DeleteFileW(path);
+    ASSERT_TRUE(ioc != NULL, "cc_ioc_load returned NULL for no-hash IOC");
+    ASSERT_TRUE(!cc_ioc_has_hashes(ioc), "empty hash list reported as hashes");
+    cc_ioc_free(ioc);
+    return NULL;
+}
+
+const char *test_proc_inventory(void)
+{
+    cc_process_view_t views[8];
+    int listed;
+    int total = -1;
+    int analyzed = -1;
+
+    listed = cc_proc_inventory_collect(views, 8, &total, &analyzed, NULL, 0);
+    ASSERT_TRUE(listed >= 0, "inventory collection failed");
+    ASSERT_TRUE(total >= listed, "inventory total is lower than listed");
+    ASSERT_TRUE(analyzed >= 0 && analyzed <= listed,
+                "inventory analyzed count is invalid");
+    ASSERT_TRUE(wcscmp(cc_integrity_name(CC_IL_SYSTEM), L"Sistema") == 0,
+                "unexpected integrity label");
     return NULL;
 }
 

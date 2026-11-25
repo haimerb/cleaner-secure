@@ -69,6 +69,8 @@ add_executable(cleaner_secure_tests
 set_target_properties(cleaner_secure_tests PROPERTIES OUTPUT_NAME cleaner-secure-tests)
 target_link_libraries(cleaner_secure_tests PRIVATE cleaner_secure_core)
 add_test(NAME unit COMMAND cleaner_secure_tests)
+add_test(NAME cli_help COMMAND cleaner-secure-cli --help)
+add_test(NAME cli_inventory COMMAND cleaner-secure-cli --json --list-processes)
 
 # Copy non-secret config next to binaries
 foreach(target cleaner-secure-cli cleaner-secure)

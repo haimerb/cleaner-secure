@@ -43,6 +43,7 @@ typedef enum {
 typedef struct {
     bool once;
     bool json;
+    bool list_processes;
     uint32_t interval_sec;
     cc_action_t action;
     uint32_t pid;
@@ -72,7 +73,8 @@ static BOOL WINAPI cc_ctrl_handler(DWORD ctrl_type)
 static void cc_usage(const char *prog)
 {
     fprintf(stdout,
-            "Usage: %s [--once] [--interval <sec>] [--json] [--kill <pid>] "
+            "Usage: %s [--once] [--interval <sec>] [--json] "
+            "[--list-processes] [--kill <pid>] "
             "[--suspend <pid>] [--resume <pid>] [--service-stop <name>] "
             "[--service-start <name>] [--block-ip <ip>] "
             "[--unblock-ip <ip>] [--help]\n",
@@ -103,6 +105,7 @@ static void cc_options_init(cc_options_t *opts)
 {
     opts->once = false;
     opts->json = false;
+    opts->list_processes = false;
     opts->interval_sec = 0;
     opts->action = CC_ACTION_NONE;
     opts->pid = 0;
@@ -132,6 +135,10 @@ static bool cc_parse_args(int argc, wchar_t **argv, cc_options_t *opts,
         }
         if (wcscmp(argv[i], L"--json") == 0) {
             opts->json = true;
+            continue;
+        }
+        if (wcscmp(argv[i], L"--list-processes") == 0) {
+            opts->list_processes = true;
             continue;
         }
         if (wcscmp(argv[i], L"--interval") == 0 ||
@@ -432,6 +439,25 @@ static const char *cc_risk_name(cc_risk_t risk)
     }
 }
 
+static const char *cc_integrity_name_ascii(cc_integrity_t integrity)
+{
+    switch (integrity) {
+    case CC_IL_LOW:
+        return "low";
+    case CC_IL_MEDIUM:
+        return "medium";
+    case CC_IL_HIGH:
+        return "high";
+    case CC_IL_SYSTEM:
+        return "system";
+    case CC_IL_PROTECTED:
+        return "protected";
+    case CC_IL_UNKNOWN:
+    default:
+        return "unknown";
+    }
+}
+
 static void cc_copy_trunc(char *dst, size_t cap, const char *src)
 {
     size_t i;
@@ -449,17 +475,17 @@ static void cc_copy_trunc(char *dst, size_t cap, const char *src)
     dst[i] = '\0';
 }
 
-static const wchar_t *cc_find_proc_name(const cc_proc_info_t *procs, int count,
-                                        uint32_t pid)
+static const wchar_t *cc_find_proc_name(const cc_process_view_t *views,
+                                        int count, uint32_t pid)
 {
     int i;
 
-    if (procs == NULL || pid == 0) {
+    if (views == NULL || pid == 0) {
         return NULL;
     }
     for (i = 0; i < count; i++) {
-        if (procs[i].pid == pid) {
-            return procs[i].name;
+        if (views[i].info.pid == pid) {
+            return views[i].info.name;
         }
     }
     return NULL;
@@ -562,8 +588,108 @@ static void cc_print_table(FILE *out, const cc_view_t *views, int count,
     }
 }
 
+static void cc_print_process_table(FILE *out, const cc_process_view_t *items,
+                                   int count, int total, int analyzed)
+{
+    char name[CC_MAX_NAME * 4 + 1];
+    char user[CC_MAX_NAME * 4 + 1];
+    char path[CC_MAX_PATH_LEN * 4 + 1];
+    char name_short[28];
+    char user_short[24];
+    char path_short[64];
+    int i;
+
+    fprintf(out, "Processes: %d  Analyzed: %d  Listed: %d\n",
+            total, analyzed, count);
+    fprintf(out, "%-8s %-28s %-24s %-7s %-8s %-8s %-12s %s\n",
+            "PID", "NAME", "USER", "SESSION", "CPU%", "RAM MB", "INTEGRITY", "PATH");
+    fprintf(out, "%-8s %-28s %-24s %-7s %-8s %-8s %-12s %s\n",
+            "--------", "----------------------------", "------------------------",
+            "-------", "--------", "--------", "------------", "--------------------");
+    for (i = 0; i < count; i++) {
+        cc_wide_to_utf8(items[i].info.name, name, sizeof(name));
+        cc_wide_to_utf8(items[i].info.user, user, sizeof(user));
+        cc_wide_to_utf8(items[i].info.path, path, sizeof(path));
+        cc_copy_trunc(name_short, sizeof(name_short), name);
+        cc_copy_trunc(user_short, sizeof(user_short), user);
+        cc_copy_trunc(path_short, sizeof(path_short), path);
+        fprintf(out, "%-8lu %-28s %-24s %-7lu %7.1f %8.1f %-12s %s\n",
+                (unsigned long)items[i].info.pid, name_short,
+                user_short[0] != '\0' ? user_short : "-",
+                (unsigned long)items[i].info.session_id,
+                items[i].metrics.cpu_percent,
+                (double)items[i].metrics.working_set / 1048576.0,
+                cc_integrity_name_ascii(items[i].info.integrity), path_short);
+    }
+}
+
+static void cc_json_process_item(FILE *out, const cc_process_view_t *item)
+{
+    char name[CC_MAX_NAME * 4 + 1];
+    char path[CC_MAX_PATH_LEN * 4 + 1];
+    char user[CC_MAX_NAME * 4 + 1];
+    char command[CC_MAX_PATH_LEN * 4 + 1];
+
+    cc_wide_to_utf8(item->info.name, name, sizeof(name));
+    cc_wide_to_utf8(item->info.path, path, sizeof(path));
+    cc_wide_to_utf8(item->info.user, user, sizeof(user));
+    cc_wide_to_utf8(item->info.command_line, command, sizeof(command));
+    fputs("{\"pid\":", out);
+    fprintf(out, "%lu", (unsigned long)item->info.pid);
+    fputs(",\"parent_pid\":", out);
+    fprintf(out, "%lu", (unsigned long)item->info.parent_pid);
+    fputs(",\"name\":", out);
+    cc_json_string(out, name);
+    fputs(",\"path\":", out);
+    cc_json_string(out, path);
+    fputs(",\"user\":", out);
+    cc_json_string(out, user);
+    fputs(",\"session_id\":", out);
+    fprintf(out, "%lu", (unsigned long)item->info.session_id);
+    fputs(",\"integrity\":", out);
+    cc_json_string(out, cc_integrity_name_ascii(item->info.integrity));
+    fputs(",\"elevated\":", out);
+    fputs(item->info.is_elevated ? "true" : "false", out);
+    fputs(",\"wow64\":", out);
+    fputs(item->info.bitness_known && item->info.is_wow64 ? "true" : "false", out);
+    fputs(",\"bitness_known\":", out);
+    fputs(item->info.bitness_known ? "true" : "false", out);
+    fputs(",\"create_time\":", out);
+    fprintf(out, "%llu", (unsigned long long)item->info.create_time);
+    fputs(",\"cpu_percent\":", out);
+    fprintf(out, "%.3f", item->metrics.cpu_percent);
+    fputs(",\"ram_bytes\":", out);
+    fprintf(out, "%llu", (unsigned long long)item->metrics.working_set);
+    fputs(",\"command_line\":", out);
+    cc_json_string(out, command);
+    fputc('}', out);
+}
+
+static void cc_print_process_json(FILE *out, const char *timestamp, uint32_t pid,
+                                  const cc_process_view_t *items, int count,
+                                  int total, int analyzed)
+{
+    int i;
+
+    fputs("{\"timestamp\":", out);
+    cc_json_string(out, timestamp);
+    fputs(",\"pid\":", out);
+    fprintf(out, "%lu", (unsigned long)pid);
+    fputs(",\"processes\":{\"total\":", out);
+    fprintf(out, "%d,\"analyzed\":%d,\"items\":[", total, analyzed);
+    for (i = 0; i < count; i++) {
+        if (i > 0) {
+            fputc(',', out);
+        }
+        cc_json_process_item(out, &items[i]);
+    }
+    fputs("]}}\n", out);
+}
+
 static void cc_print_json(FILE *out, const char *timestamp, uint32_t pid,
-                          int total_processes, const cc_view_t *views, int count)
+                          int total_processes, const cc_view_t *views, int count,
+                          const cc_process_view_t *inventory,
+                          int inventory_count, int inventory_analyzed)
 {
     char target[CC_MAX_NAME * 4 + 1];
     char indicator[64 * 4 + 1];
@@ -571,8 +697,17 @@ static void cc_print_json(FILE *out, const char *timestamp, uint32_t pid,
 
     fputs("{\"timestamp\":", out);
     cc_json_string(out, timestamp);
-    fprintf(out, ",\"pid\":%lu,\"total_processes\":%d,\"alerts\":[",
-            (unsigned long)pid, total_processes);
+    fprintf(out, ",\"pid\":%lu,\"total_processes\":%d"
+                 ",\"processes\":{\"total\":%d,\"analyzed\":%d,\"items\":[",
+            (unsigned long)pid, total_processes, total_processes,
+            inventory_analyzed);
+    for (i = 0; i < inventory_count; i++) {
+        if (i > 0) {
+            fputc(',', out);
+        }
+        cc_json_process_item(out, &inventory[i]);
+    }
+    fputs("]},\"alerts\":[", out);
     for (i = 0; i < count; i++) {
         if (i > 0) {
             fputc(',', out);
@@ -599,8 +734,10 @@ static void cc_print_json(FILE *out, const char *timestamp, uint32_t pid,
 }
 
 static int cc_scan_once(cc_detect_ctx_t *ctx, const cc_ioc_t *ioc,
-                        int eventlog_window_minutes, cc_proc_info_t *procs,
-                        int procs_cap, cc_alert_t *alerts, cc_view_t *views,
+                        int eventlog_window_minutes,
+                        cc_process_view_t *inventory, int inventory_cap,
+                        cc_metrics_t *inventory_metrics, int *inventory_count,
+                        int *analyzed, cc_alert_t *alerts, cc_view_t *views,
                         int cap, int *total_processes)
 {
     cc_proc_metrics_t metrics_sample;
@@ -654,22 +791,31 @@ static int cc_scan_once(cc_detect_ctx_t *ctx, const cc_ioc_t *ioc,
         }
         count += added;
     }
-    listed = cc_proc_list(procs, procs_cap);
+    *inventory_count = 0;
+    if (analyzed != NULL) {
+        *analyzed = 0;
+    }
+    listed = cc_proc_inventory_collect(inventory, inventory_cap, total_processes,
+                                       analyzed, inventory_metrics, deadline);
     if (listed < 0) {
         listed = 0;
     }
-    *total_processes = listed;
-    if (listed > procs_cap) {
-        listed = procs_cap;
+    if (*total_processes < 0) {
+        *total_processes = 0;
     }
+    if (listed > inventory_cap) {
+        listed = inventory_cap;
+    }
+    *inventory_count = listed;
     for (i = 0; i < count; i++) {
         views[i].alert = alerts[i];
         views[i].score = cc_alert_score(alerts[i].risk, alerts[i].category);
-        views[i].name = cc_find_proc_name(procs, listed, alerts[i].pid);
+        views[i].name = cc_find_proc_name(inventory, listed, alerts[i].pid);
         views[i].cpu = 0.0;
         views[i].ram_mb = 0.0;
-        if (alerts[i].pid != 0 &&
-            cc_metrics_sample(ctx->metrics, alerts[i].pid, &metrics_sample)) {
+        if (alerts[i].pid != 0 && inventory_metrics != NULL &&
+            cc_metrics_sample(inventory_metrics, alerts[i].pid,
+                              &metrics_sample)) {
             views[i].cpu = metrics_sample.cpu_percent;
             views[i].ram_mb = (double)metrics_sample.working_set / 1048576.0;
         }
@@ -706,8 +852,9 @@ static int cc_main_wide(int argc, wchar_t **argv)
     cc_ioc_t *ioc;
     cc_publishers_t *publishers;
     cc_metrics_t *metrics;
+    cc_metrics_t *inventory_metrics;
     cc_trust_cache_t *trust_cache;
-    cc_proc_info_t *procs;
+    cc_process_view_t *inventory;
     cc_alert_t *alerts;
     cc_view_t *views;
     wchar_t ioc_path[CC_MAX_PATH_LEN];
@@ -715,6 +862,8 @@ static int cc_main_wide(int argc, wchar_t **argv)
     uint32_t interval_sec;
     int eventlog_window_minutes;
     int alert_count;
+    int listed;
+    int analyzed;
     int total_processes;
     char timestamp[64];
     FILE *status;
@@ -760,11 +909,53 @@ static int cc_main_wide(int argc, wchar_t **argv)
     ioc = NULL;
     publishers = NULL;
     metrics = NULL;
+    inventory_metrics = NULL;
     trust_cache = NULL;
-    procs = NULL;
+    inventory = NULL;
     alerts = NULL;
     views = NULL;
+    listed = 0;
+    analyzed = 0;
+    total_processes = 0;
     rc = 1;
+
+    if (opts.list_processes) {
+        ULONGLONG deadline = GetTickCount64() + 60000;
+
+        if (cfg.scan_timeout_ms != 0) {
+            deadline = GetTickCount64() + (ULONGLONG)cfg.scan_timeout_ms;
+        }
+        inventory = (cc_process_view_t *)calloc((size_t)CC_MAX_PROCS,
+                                                sizeof(*inventory));
+        inventory_metrics = cc_metrics_create();
+        if (inventory == NULL || inventory_metrics == NULL) {
+            fprintf(stderr, "Out of memory\n");
+            goto cleanup;
+        }
+        listed = cc_proc_inventory_collect(inventory, CC_MAX_PROCS,
+                                           &total_processes, &analyzed,
+                                           inventory_metrics, deadline);
+        if (listed < 0) {
+            listed = 0;
+        }
+        if (listed > CC_MAX_PROCS) {
+            listed = CC_MAX_PROCS;
+        }
+        if (total_processes < 0) {
+            total_processes = 0;
+        }
+        cc_make_timestamp(timestamp, sizeof(timestamp));
+        if (opts.json) {
+            cc_print_process_json(stdout, timestamp, GetCurrentProcessId(),
+                                  inventory, listed, total_processes, analyzed);
+        } else {
+            cc_print_process_table(stdout, inventory, listed, total_processes,
+                                   analyzed);
+        }
+        fflush(stdout);
+        rc = 0;
+        goto cleanup;
+    }
 
     ioc = cc_ioc_load(ioc_path);
     publishers = cc_publishers_load(publishers_path);
@@ -774,10 +965,13 @@ static int cc_main_wide(int argc, wchar_t **argv)
         fprintf(stderr, "Failed to initialize scanner contexts\n");
         goto cleanup;
     }
-    procs = (cc_proc_info_t *)calloc((size_t)CC_MAX_PROCS, sizeof(*procs));
+    inventory = (cc_process_view_t *)calloc((size_t)CC_MAX_PROCS,
+                                            sizeof(*inventory));
+    inventory_metrics = cc_metrics_create();
     alerts = (cc_alert_t *)calloc((size_t)CC_ALERT_CAP, sizeof(*alerts));
     views = (cc_view_t *)calloc((size_t)CC_ALERT_CAP, sizeof(*views));
-    if (procs == NULL || alerts == NULL || views == NULL) {
+    if (inventory == NULL || inventory_metrics == NULL || alerts == NULL ||
+        views == NULL) {
         fprintf(stderr, "Out of memory\n");
         goto cleanup;
     }
@@ -803,13 +997,14 @@ static int cc_main_wide(int argc, wchar_t **argv)
         if (!opts.json && !opts.once && !cc_clear_console()) {
             fprintf(stdout, "\n--- scan ---\n");
         }
-        alert_count = cc_scan_once(&ctx, ioc, eventlog_window_minutes, procs,
-                                   CC_MAX_PROCS, alerts, views, CC_ALERT_CAP,
+        alert_count = cc_scan_once(&ctx, ioc, eventlog_window_minutes, inventory,
+                                   CC_MAX_PROCS, inventory_metrics, &listed,
+                                   &analyzed, alerts, views, CC_ALERT_CAP,
                                    &total_processes);
         if (opts.json) {
             cc_make_timestamp(timestamp, sizeof(timestamp));
             cc_print_json(stdout, timestamp, GetCurrentProcessId(), total_processes,
-                          views, alert_count);
+                          views, alert_count, inventory, listed, analyzed);
         } else {
             cc_print_table(stdout, views, alert_count, total_processes);
         }
@@ -824,8 +1019,9 @@ static int cc_main_wide(int argc, wchar_t **argv)
 cleanup:
     free(views);
     free(alerts);
-    free(procs);
+    free(inventory);
     cc_trust_cache_free(trust_cache);
+    cc_metrics_destroy(inventory_metrics);
     cc_metrics_destroy(metrics);
     cc_publishers_free(publishers);
     cc_ioc_free(ioc);

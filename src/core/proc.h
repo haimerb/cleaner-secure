@@ -3,8 +3,20 @@
 
 #include "types.h"
 
+struct cc_metrics_s;
+
 /* Snapshot all processes. Returns count, fills caller array up to cap. */
 int cc_proc_list(cc_proc_info_t *out, int cap);
+
+/* Like cc_proc_list, also reports total enumerated processes. */
+int cc_proc_list_ex(cc_proc_info_t *out, int cap, int *total);
+
+/* Inventory view for Task Manager-style process tables. */
+int cc_proc_inventory_collect(cc_process_view_t *out, int cap, int *total,
+                              int *analyzed, struct cc_metrics_s *metrics,
+                              ULONGLONG deadline);
+
+const wchar_t *cc_integrity_name(cc_integrity_t integrity);
 
 /* Snapshot services (SCM). Returns count; -1 on SCM access failure. */
 int cc_service_list(cc_service_info_t *out, int cap);
