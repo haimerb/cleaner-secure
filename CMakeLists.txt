@@ -12,7 +12,7 @@ add_compile_options(-Wall -Wextra -fstack-protector-strong -Wformat=2 -Werror=fo
 add_compile_definitions(_FORTIFY_SOURCE=2)
 
 # --- core static library ---
-add_library(cleaner_core STATIC
+add_library(cleaner_secure_core STATIC
   src/core/proc.c
   src/core/metrics.c
   src/core/config.c
@@ -26,8 +26,8 @@ add_library(cleaner_core STATIC
   src/core/response.c
 )
 
-target_include_directories(cleaner_core PUBLIC src/core)
-target_link_libraries(cleaner_core PUBLIC
+target_include_directories(cleaner_secure_core PUBLIC src/core)
+target_link_libraries(cleaner_secure_core PUBLIC
   advapi32
   wevtapi
   crypt32
@@ -42,28 +42,29 @@ target_link_libraries(cleaner_core PUBLIC
 )
 
 # --- CLI ---
-add_executable(cleaner-c-cli src/cli/main.c)
-target_link_libraries(cleaner-c-cli PRIVATE cleaner_core)
-target_link_options(cleaner-c-cli PRIVATE -Wl,--dynamicbase,--nxcompat,--high-entropy-va)
+add_executable(cleaner-secure-cli src/cli/main.c)
+target_link_libraries(cleaner-secure-cli PRIVATE cleaner_secure_core)
+target_link_options(cleaner-secure-cli PRIVATE -Wl,--dynamicbase,--nxcompat,--high-entropy-va)
 
 # --- GUI (Win32) ---
-add_executable(cleaner-c WIN32 src/gui/main.c)
-target_link_libraries(cleaner-c PRIVATE cleaner_core comctl32)
-target_link_options(cleaner-c PRIVATE -Wl,--dynamicbase,--nxcompat,--high-entropy-va)
+add_executable(cleaner-secure WIN32 src/gui/main.c)
+target_link_libraries(cleaner-secure PRIVATE cleaner_secure_core comctl32)
+target_link_options(cleaner-secure PRIVATE -Wl,--dynamicbase,--nxcompat,--high-entropy-va)
 
 # --- tests ---
 enable_testing()
-add_executable(cleaner_tests
+add_executable(cleaner_secure_tests
   tests/test_main.c
   tests/test_json.c
   tests/test_ioc.c
   tests/test_response.c
 )
-target_link_libraries(cleaner_tests PRIVATE cleaner_core)
-add_test(NAME unit COMMAND cleaner_tests)
+set_target_properties(cleaner_secure_tests PROPERTIES OUTPUT_NAME cleaner-secure-tests)
+target_link_libraries(cleaner_secure_tests PRIVATE cleaner_secure_core)
+add_test(NAME unit COMMAND cleaner_secure_tests)
 
 # Copy non-secret config next to binaries
-foreach(target cleaner-c-cli cleaner-c)
+foreach(target cleaner-secure-cli cleaner-secure)
   add_custom_command(TARGET ${target} POST_BUILD
     COMMAND ${CMAKE_COMMAND} -E make_directory $<TARGET_FILE_DIR:${target}>/config
     COMMAND ${CMAKE_COMMAND} -E copy_if_different

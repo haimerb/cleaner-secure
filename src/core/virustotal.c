@@ -220,7 +220,7 @@ static bool cc_vt_request(const wchar_t *hash, char *hits, char *total)
     wcscpy(header, L"x-apikey: ");
     wcscat(header, key_w);
 
-    session = WinHttpOpen(L"cleaner-c/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
+    session = WinHttpOpen(L"cleaner-secure/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
                           WINHTTP_NO_PROXY_NAME, WINHTTP_NO_PROXY_BYPASS, 0);
     if (session == NULL) {
         goto done;

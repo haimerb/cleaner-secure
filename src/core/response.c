@@ -53,7 +53,7 @@ static void cc_response_audit(const wchar_t *action, const wchar_t *target, bool
         }
     }
     dir[len] = L'\0';
-    if (!cc_audit_append(dir, MAX_PATH, L"\\cleaner-c")) {
+    if (!cc_audit_append(dir, MAX_PATH, L"\\cleaner-secure")) {
         return;
     }
     CreateDirectoryW(dir, NULL);
@@ -97,7 +97,7 @@ static bool cc_pid_allowed(uint32_t pid, DWORD *err)
     static const wchar_t *const deny[] = {
         L"csrss.exe", L"wininit.exe", L"winlogon.exe", L"services.exe",
         L"lsass.exe", L"smss.exe", L"system", L"registry",
-        L"cleaner-c.exe", L"cleaner-c-cli.exe"
+        L"cleaner-secure.exe", L"cleaner-secure-cli.exe"
     };
     wchar_t path[CC_MAX_PATH_LEN];
     DWORD len = CC_MAX_PATH_LEN;
