@@ -876,9 +876,6 @@ static void ui_stop_worker(HWND hwnd)
 
 static void ui_set_scanning(bool scanning)
 {
-    if (g.btn_scan != NULL) {
-        (void)EnableWindow(g.btn_scan, !scanning);
-    }
     if (g.progress != NULL) {
         (void)SendMessageW(g.progress, PBM_SETPOS, scanning ? 0 : 100, 0);
         (void)SendMessageW(g.progress, PBM_SETMARQUEE, (WPARAM)(scanning ? TRUE : FALSE), 0);
@@ -891,13 +888,19 @@ static void ui_set_scanning(bool scanning)
 static void ui_request_scan(bool vt_live)
 {
     if (g.scan_event == NULL ||
-        InterlockedCompareExchange(&g.shutdown, 0, 0) != 0 ||
-        InterlockedCompareExchange(&g.scan_busy, 0, 0) != 0 ||
-        InterlockedCompareExchange(&g.scan_pending, 0, 0) != 0) {
+        InterlockedCompareExchange(&g.shutdown, 0, 0) != 0) {
         return;
     }
     if (vt_live) {
         InterlockedExchange(&g.vt_live_request, 1);
+    }
+    if (InterlockedCompareExchange(&g.scan_busy, 0, 0) != 0 ||
+        InterlockedCompareExchange(&g.scan_pending, 0, 0) != 0) {
+        if (vt_live) {
+            (void)InterlockedExchange(&g.scan_pending, 1);
+            (void)SetEvent(g.scan_event);
+        }
+        return;
     }
     (void)InterlockedExchange(&g.scan_pending, 1);
     ui_set_scanning(true);
