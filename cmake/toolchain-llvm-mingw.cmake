@@ -1,0 +1,16 @@
+# CMake toolchain for llvm-mingw (clang + mingw-w64 ucrt)
+set(CMAKE_SYSTEM_NAME Windows)
+set(CMAKE_SYSTEM_PROCESSOR AMD64)
+
+set(TOOLCHAIN_ROOT "C:/llvm-mingw-20261117-ucrt-x86_64")
+set(CMAKE_C_COMPILER   "${TOOLCHAIN_ROOT}/bin/clang.exe")
+set(CMAKE_CXX_COMPILER "${TOOLCHAIN_ROOT}/bin/clang++.exe")
+set(CMAKE_RC_COMPILER  "${TOOLCHAIN_ROOT}/bin/llvm-rc.exe")
+set(CMAKE_AR           "${TOOLCHAIN_ROOT}/bin/llvm-ar.exe")
+set(CMAKE_RANLIB       "${TOOLCHAIN_ROOT}/bin/llvm-ranlib.exe")
+set(CMAKE_STRIP        "${TOOLCHAIN_ROOT}/bin/llvm-strip.exe")
+
+set(CMAKE_FIND_ROOT_PATH "${TOOLCHAIN_ROOT}/x86_64-w64-mingw32")
+set(CMAKE_FIND_ROOT_PATH_MODE_PROGRAM NEVER)
+set(CMAKE_FIND_ROOT_PATH_MODE_LIBRARY ONLY)
+set(CMAKE_FIND_ROOT_PATH_MODE_INCLUDE ONLY)
