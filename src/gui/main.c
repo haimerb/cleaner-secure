@@ -814,14 +814,19 @@ static DWORD WINAPI ui_scan_thread_proc(LPVOID param)
             ui_scan_result_t *result = ui_scan_collect(vt_live);
             bool posted = false;
 
-            if (result != NULL) {
+            if (result != NULL &&
+                InterlockedCompareExchange(&g.shutdown, 0, 0) == 0 &&
+                g.hwnd != NULL) {
+                posted = PostMessageW(g.hwnd, WM_APP_SCAN_DONE, 0,
+                                      (LPARAM)result) ? true : false;
+            }
+            if (!posted) {
+                if (result != NULL) {
+                    ui_free_result(result);
+                }
                 if (InterlockedCompareExchange(&g.shutdown, 0, 0) == 0 &&
                     g.hwnd != NULL) {
-                    posted = PostMessageW(g.hwnd, WM_APP_SCAN_DONE, 0,
-                                          (LPARAM)result) ? true : false;
-                }
-                if (!posted) {
-                    ui_free_result(result);
+                    (void)PostMessageW(g.hwnd, WM_APP_SCAN_DONE, 0, 0);
                 }
             }
             InterlockedExchange(&g.scan_busy, 0);
@@ -957,10 +962,13 @@ static void ui_apply_scan_result(ui_scan_result_t *result)
 {
     SYSTEMTIME now;
 
+    ui_set_scanning(false);
     if (result == NULL) {
+        if (g.status != NULL) {
+            SetWindowTextW(g.status, L"No se pudo completar el análisis.");
+        }
         return;
     }
-    ui_set_scanning(false);
     if (!result->ok || result->count < 0) {
         MessageBoxW(NULL, L"No se pudo completar el análisis.",
                     L"cleaner-secure", MB_OK | MB_ICONERROR);
