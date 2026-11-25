@@ -5,8 +5,11 @@ extern const char *test_json_accessors(void);
 extern const char *test_json_utf8(void);
 extern const char *test_ioc_load_match(void);
 extern const char *test_ioc_publishers(void);
+extern const char *test_ioc_network(void);
 extern const char *test_response_denylist(void);
+extern const char *test_response_ip_denylist(void);
 extern const char *test_config_defaults(void);
+extern const char *test_network_scan_snapshot(void);
 
 #define ASSERT_TRUE(cond, msg) \
     do { \
@@ -43,8 +46,11 @@ int main(void)
     failed += run_one("test_json_utf8", test_json_utf8);
     failed += run_one("test_ioc_load_match", test_ioc_load_match);
     failed += run_one("test_ioc_publishers", test_ioc_publishers);
+    failed += run_one("test_ioc_network", test_ioc_network);
     failed += run_one("test_response_denylist", test_response_denylist);
+    failed += run_one("test_response_ip_denylist", test_response_ip_denylist);
     failed += run_one("test_config_defaults", test_config_defaults);
+    failed += run_one("test_network_scan_snapshot", test_network_scan_snapshot);
     if (failed != 0) {
         printf("%d test(s) failed\n", failed);
     }

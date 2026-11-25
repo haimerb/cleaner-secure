@@ -1,6 +1,7 @@
 # Local secrets — never commit
 config/local.json
 *.local.json
+AGENTS.md
 
 # Build
 build/

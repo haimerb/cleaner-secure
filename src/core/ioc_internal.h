@@ -19,6 +19,10 @@ struct cc_ioc_s {
     int svc_names_n;
     wchar_t svc_path_subs[64][CC_MAX_PATH_LEN];
     int svc_path_subs_n;
+    uint32_t malicious_ipv4[64];
+    int malicious_ipv4_n;
+    uint16_t suspicious_ports[128];
+    int suspicious_ports_n;
     struct {
         wchar_t parent[CC_MAX_NAME];
         wchar_t children[16][CC_MAX_NAME];

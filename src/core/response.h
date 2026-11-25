@@ -13,4 +13,7 @@ bool cc_resume_process(uint32_t pid, DWORD *err);
 bool cc_service_stop(const wchar_t *name, DWORD *err);
 bool cc_service_start(const wchar_t *name, DWORD *err);
 
+bool cc_block_ip(const wchar_t *ip, DWORD *err);
+bool cc_unblock_ip(const wchar_t *ip, DWORD *err);
+
 #endif /* CC_RESPONSE_H */

@@ -1,3 +1,6 @@
+#define WIN32_LEAN_AND_MEAN
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include "ioc_internal.h"
 
 typedef enum {
@@ -125,6 +128,49 @@ static void load_paths(const cc_json_t *arr, wchar_t dst[][CC_MAX_PATH_LEN], int
     }
 }
 
+static void load_ipv4(const cc_json_t *arr, uint32_t dst[64], int maxn, int *out_n)
+{
+    int n = cc_json_arr_len(arr);
+    int i;
+
+    *out_n = 0;
+    for (i = 0; i < n && *out_n < maxn; i++) {
+        const cc_json_t *it = cc_json_arr_get(arr, i);
+        const char *s = NULL;
+        uint32_t addr = 0;
+        if (!cc_json_is_str(it, &s) || s == NULL || s[0] == '\0') continue;
+        if (InetPtonA(AF_INET, s, &addr) != 1) continue;
+        dst[(*out_n)++] = addr;
+    }
+}
+
+static void load_ports(const cc_json_t *arr, uint16_t dst[128], int maxn, int *out_n)
+{
+    int n = cc_json_arr_len(arr);
+    int i;
+
+    *out_n = 0;
+    for (i = 0; i < n && *out_n < maxn; i++) {
+        const cc_json_t *it = cc_json_arr_get(arr, i);
+        const char *s = NULL;
+        char *stop = NULL;
+        unsigned long value = 0;
+        double num = 0.0;
+
+        if (cc_json_is_str(it, &s) && s != NULL && s[0] != '\0') {
+            value = strtoul(s, &stop, 10);
+            if (stop == s || *stop != '\0') continue;
+        } else if (cc_json_is_num(it, &num)) {
+            if (num < 1.0 || num > 65535.0) continue;
+            value = (unsigned long)num;
+        } else {
+            continue;
+        }
+        if (value == 0 || value > 65535) continue;
+        dst[(*out_n)++] = (uint16_t)value;
+    }
+}
+
 cc_ioc_t *cc_ioc_load(const wchar_t *path)
 {
     cc_json_t *root;
@@ -167,6 +213,10 @@ cc_ioc_t *cc_ioc_load(const wchar_t *path)
     if (arr != NULL) load_names(arr, ioc->svc_names, 128, &ioc->svc_names_n);
     arr = cc_json_obj_get(root, "service_path_substrings");
     if (arr != NULL) load_paths(arr, ioc->svc_path_subs, 64, &ioc->svc_path_subs_n);
+    arr = cc_json_obj_get(root, "malicious_ips");
+    if (arr != NULL) load_ipv4(arr, ioc->malicious_ipv4, 64, &ioc->malicious_ipv4_n);
+    arr = cc_json_obj_get(root, "suspicious_ports");
+    if (arr != NULL) load_ports(arr, ioc->suspicious_ports, 128, &ioc->suspicious_ports_n);
 
     sp = cc_json_obj_get(root, "suspicious_parents");
     if (sp != NULL) {
@@ -208,7 +258,8 @@ void cc_ioc_free(cc_ioc_t *ioc)
 int cc_ioc_count(const cc_ioc_t *ioc)
 {
     if (ioc == NULL) return 0;
-    return ioc->proc_names_n + ioc->path_subs_n + ioc->hashes_n + ioc->svc_names_n + ioc->svc_path_subs_n + ioc->parents_n;
+    return ioc->proc_names_n + ioc->path_subs_n + ioc->hashes_n + ioc->svc_names_n +
+           ioc->svc_path_subs_n + ioc->malicious_ipv4_n + ioc->suspicious_ports_n + ioc->parents_n;
 }
 
 bool cc_ioc_match_proc(const cc_ioc_t *ioc, const wchar_t *name, const wchar_t *path, const char *sha256)
@@ -246,6 +297,28 @@ bool cc_ioc_match_service(const cc_ioc_t *ioc, const wchar_t *service_name, cons
         for (i = 0; i < ioc->svc_path_subs_n; i++) {
             if (wcontains_i(service_path, ioc->svc_path_subs[i])) return true;
         }
+    }
+    return false;
+}
+
+bool cc_ioc_is_malicious_ipv4(const cc_ioc_t *ioc, uint32_t addr)
+{
+    int i;
+
+    if (ioc == NULL || addr == 0) return false;
+    for (i = 0; i < ioc->malicious_ipv4_n; i++) {
+        if (ioc->malicious_ipv4[i] == addr) return true;
+    }
+    return false;
+}
+
+bool cc_ioc_is_suspicious_port(const cc_ioc_t *ioc, uint16_t port)
+{
+    int i;
+
+    if (ioc == NULL || port == 0) return false;
+    for (i = 0; i < ioc->suspicious_ports_n; i++) {
+        if (ioc->suspicious_ports[i] == port) return true;
     }
     return false;
 }

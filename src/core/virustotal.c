@@ -17,7 +17,7 @@
 #define CC_VT_BODY_MAX 1048576u
 
 typedef struct {
-    char hash[65];
+    char key[65];
     char hits;
     char total;
 } cc_vt_cache_entry_t;
@@ -29,6 +29,8 @@ static bool vt_session_disabled = false;
 static bool vt_cache_loaded = false;
 static cc_vt_cache_entry_t vt_cache[CC_VT_CACHE_MAX];
 static size_t vt_cache_count = 0;
+static cc_vt_cache_entry_t vt_ip_cache[512];
+static size_t vt_ip_cache_count = 0;
 static time_t vt_requests[CC_VT_RATE_MAX];
 static size_t vt_request_count = 0;
 
@@ -41,24 +43,40 @@ static void cc_vt_load_cache(void)
     vt_cache_count = 0;
 }
 
-static void cc_vt_cache_add(const char *hash, char hits, char total)
+static void cc_vt_cache_add(cc_vt_cache_entry_t *cache, size_t *count, size_t cap,
+                            const char *key, char hits, char total)
 {
     size_t i;
 
-    for (i = 0; i < vt_cache_count; i++) {
-        if (strcmp(vt_cache[i].hash, hash) == 0) {
-            break;
+    for (i = 0; i < *count; i++) {
+        if (strcmp(cache[i].key, key) == 0) {
+            cache[i].hits = hits;
+            cache[i].total = total;
+            return;
         }
     }
-    if (i < vt_cache_count) {
-        vt_cache[i].hits = hits;
-        vt_cache[i].total = total;
-    } else if (vt_cache_count < CC_VT_CACHE_MAX) {
-        memcpy(vt_cache[vt_cache_count].hash, hash, sizeof(vt_cache[0].hash));
-        vt_cache[vt_cache_count].hits = hits;
-        vt_cache[vt_cache_count].total = total;
-        vt_cache_count++;
+    if (*count < cap) {
+        strncpy(cache[*count].key, key, sizeof(cache[0].key) - 1);
+        cache[*count].key[sizeof(cache[0].key) - 1] = '\0';
+        cache[*count].hits = hits;
+        cache[*count].total = total;
+        (*count)++;
     }
+}
+
+static bool cc_vt_cache_find(const cc_vt_cache_entry_t *cache, size_t count,
+                             const char *key, char *hits, char *total)
+{
+    size_t i;
+
+    for (i = 0; i < count; i++) {
+        if (strcmp(cache[i].key, key) == 0) {
+            *hits = cache[i].hits;
+            *total = cache[i].total;
+            return true;
+        }
+    }
+    return false;
 }
 
 static bool cc_vt_rate_limit(void)
@@ -196,13 +214,12 @@ static bool cc_vt_parse_stats(const char *body, char *hits, char *total)
     return true;
 }
 
-static bool cc_vt_request(const wchar_t *hash, char *hits, char *total)
+static bool cc_vt_request(const wchar_t *resource, char *hits, char *total)
 {
     HINTERNET session = NULL;
     HINTERNET connect = NULL;
     HINTERNET request = NULL;
     wchar_t key_w[CC_VT_KEY_LEN];
-    wchar_t resource[128];
     wchar_t header[CC_VT_KEY_LEN + 32];
     char *body = NULL;
     size_t len = 0;
@@ -212,11 +229,9 @@ static bool cc_vt_request(const wchar_t *hash, char *hits, char *total)
     bool ok = false;
 
     if (MultiByteToWideChar(CP_UTF8, 0, vt_key, -1, key_w, CC_VT_KEY_LEN) == 0 ||
-        wcslen(hash) + 20 >= 128) {
+        wcslen(resource) + 1 >= 128) {
         goto done;
     }
-    wcscpy(resource, L"/api/v3/files/");
-    wcscat(resource, hash);
     wcscpy(header, L"x-apikey: ");
     wcscat(header, key_w);
 
@@ -359,54 +374,112 @@ void cc_virustotal_reset(void)
 {
     memset(vt_cache, 0, sizeof(vt_cache));
     vt_cache_count = 0;
+    memset(vt_ip_cache, 0, sizeof(vt_ip_cache));
+    vt_ip_cache_count = 0;
     vt_cache_loaded = false;
     vt_request_count = 0;
     vt_session_disabled = false;
 }
 
-bool cc_virustotal_lookup(const char *sha256, cc_trust_result_t *out)
+static bool cc_vt_valid_ipv4(const char *ip)
+{
+    int parts = 0;
+    unsigned value = 0;
+    bool digit = false;
+    size_t i;
+
+    if (ip == NULL || ip[0] == '\0') return false;
+    for (i = 0; ip[i] != '\0'; i++) {
+        char c = ip[i];
+        if (c >= '0' && c <= '9') {
+            value = value * 10u + (unsigned)(c - '0');
+            if (value > 255u) return false;
+            digit = true;
+        } else if (c == '.') {
+            if (!digit || parts == 3) return false;
+            parts++;
+            value = 0;
+            digit = false;
+        } else {
+            return false;
+        }
+    }
+    return digit && parts == 3;
+}
+
+bool cc_virustotal_lookup_ex(const char *sha256, cc_trust_result_t *out, bool allow_live)
 {
     char key[65];
     wchar_t hash[65];
-    size_t i;
+    wchar_t resource[128];
     char hits = -1;
     char total = -1;
+    size_t i;
 
-    if (out == NULL) {
-        return false;
-    }
+    if (out == NULL) return false;
     out->virustotal_hits = -1;
     out->virustotal_total = -1;
-    if (vt_disabled || vt_session_disabled || sha256 == NULL || strlen(sha256) != 64) {
-        return false;
-    }
+    if (sha256 == NULL || strlen(sha256) != 64) return false;
     for (i = 0; i < 64; i++) {
         char c = sha256[i];
-        if (c >= 'A' && c <= 'F') {
-            c = (char)(c - 'A' + 'a');
-        }
-        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) {
-            return false;
-        }
+        if (c >= 'A' && c <= 'F') c = (char)(c - 'A' + 'a');
+        if (!((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f'))) return false;
         key[i] = c;
     }
     key[64] = '\0';
 
     cc_vt_load_cache();
-    for (i = 0; i < vt_cache_count; i++) {
-        if (strcmp(vt_cache[i].hash, key) == 0) {
-            out->virustotal_hits = vt_cache[i].hits;
-            out->virustotal_total = vt_cache[i].total;
-            return true;
-        }
+    if (cc_vt_cache_find(vt_cache, vt_cache_count, key, &hits, &total)) {
+        out->virustotal_hits = hits;
+        out->virustotal_total = total;
+        return true;
     }
-    if (!cc_vt_rate_limit() ||
-        MultiByteToWideChar(CP_UTF8, 0, key, -1, hash, 65) == 0 ||
-        !cc_vt_request(hash, &hits, &total)) {
-        return false;
-    }
+    if (!allow_live || vt_disabled || vt_session_disabled) return false;
+    if (MultiByteToWideChar(CP_UTF8, 0, key, -1, hash, 65) == 0) return false;
+    wcscpy(resource, L"/api/v3/files/");
+    wcscat(resource, hash);
+    if (!cc_vt_rate_limit() || !cc_vt_request(resource, &hits, &total)) return false;
     out->virustotal_hits = hits;
     out->virustotal_total = total;
-    cc_vt_cache_add(key, hits, total);
+    cc_vt_cache_add(vt_cache, &vt_cache_count, CC_VT_CACHE_MAX, key, hits, total);
+    return true;
+}
+
+bool cc_virustotal_lookup(const char *sha256, cc_trust_result_t *out)
+{
+    return cc_virustotal_lookup_ex(sha256, out, true);
+}
+
+bool cc_virustotal_lookup_ip(const char *ip, int *hits, int *total, bool allow_live)
+{
+    wchar_t ip_w[64];
+    wchar_t resource[128];
+    char cached_hits = -1;
+    char cached_total = -1;
+
+    if (hits == NULL || total == NULL) return false;
+    *hits = -1;
+    *total = -1;
+    if (!cc_vt_valid_ipv4(ip)) return false;
+
+    cc_vt_load_cache();
+    if (cc_vt_cache_find(vt_ip_cache, vt_ip_cache_count, ip,
+                         &cached_hits, &cached_total)) {
+        *hits = cached_hits;
+        *total = cached_total;
+        return true;
+    }
+    if (!allow_live || vt_disabled || vt_session_disabled) return false;
+    if (MultiByteToWideChar(CP_UTF8, 0, ip, -1, ip_w, 64) == 0) return false;
+    wcscpy(resource, L"/api/v3/ip_addresses/");
+    wcscat(resource, ip_w);
+    if (!cc_vt_rate_limit() ||
+        !cc_vt_request(resource, &cached_hits, &cached_total)) {
+        return false;
+    }
+    *hits = cached_hits;
+    *total = cached_total;
+    cc_vt_cache_add(vt_ip_cache, &vt_ip_cache_count, 512, ip,
+                    cached_hits, cached_total);
     return true;
 }

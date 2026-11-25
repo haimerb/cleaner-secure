@@ -13,6 +13,7 @@
 #include "metrics.h"
 #include "registry_scan.h"
 #include "eventlog_scan.h"
+#include "network_scan.h"
 #include "response.h"
 #include "trust.h"
 
@@ -32,10 +33,13 @@
 #define ID_BTN_ELEV 106
 #define ID_BTN_RUNAS 107
 #define ID_CHK_AUTO 108
+#define ID_BTN_BLOCK_IP 109
+#define ID_BTN_UNBLOCK_IP 110
 #define ID_TIMER 1
+#define WM_APP_SCAN_DONE (WM_APP + 1)
 #define CC_ALERT_CAP 1024
 #define CC_COL_REASON 6
-#define CC_IDI_APPLICATION 32512
+#define CC_IDI_APPLICATION 100
 #define CC_IDC_ARROW 32512
 
 typedef struct {
@@ -46,15 +50,30 @@ typedef struct {
 } ui_row_t;
 
 typedef struct {
+    ui_row_t *rows;
+    int count;
+} ui_scan_result_t;
+
+typedef struct {
     HWND list;
     HWND status;
     HWND btn_scan;
     HWND btn_kill;
     HWND btn_suspend;
     HWND btn_resume;
+    HWND btn_block_ip;
+    HWND btn_unblock_ip;
     HWND btn_elev;
     HWND btn_runas;
     HWND chk_auto;
+    HWND hwnd;
+    HANDLE scan_event;
+    HANDLE stop_event;
+    HANDLE scan_thread;
+    volatile LONG scan_pending;
+    volatile LONG scan_busy;
+    volatile LONG shutdown;
+    volatile LONG vt_live_request;
     HFONT font;
     cc_config_t cfg;
     cc_ioc_t *ioc;
@@ -307,10 +326,11 @@ static int ui_append_alerts(int used, int cap, int count)
     return count;
 }
 
-static void ui_scan(void)
+static ui_scan_result_t *ui_scan_collect(bool vt_live)
 {
     cc_alert_t *buffer;
     ui_row_t *rows;
+    ui_scan_result_t *result;
     cc_detect_ctx_t ctx;
     cc_proc_metrics_t pm;
     int count = 0;
@@ -323,7 +343,7 @@ static void ui_scan(void)
     }
     buffer = (cc_alert_t *)calloc(CC_ALERT_CAP, sizeof(*buffer));
     if (buffer == NULL) {
-        return;
+        return NULL;
     }
 
     memset(&ctx, 0, sizeof(ctx));
@@ -332,6 +352,16 @@ static void ui_scan(void)
     ctx.pubs = g.pubs;
     ctx.metrics = g.metrics;
     ctx.trust_cache = g.cache;
+    ctx.vt_live = vt_live;
+    ctx.vt_live_budget = 0;
+    if (vt_live && g.cfg.vt_api_key[0] != L'\0') {
+        uint32_t cap = g.cfg.network_vt_max_lookups;
+        if (cap > 64) {
+            cap = 64;
+        }
+        ctx.vt_live_budget = (int)cap;
+    }
+
     added = cc_detect_processes(&ctx, buffer, CC_ALERT_CAP, deadline);
     count += ui_append_alerts(count, CC_ALERT_CAP, added);
 
@@ -342,10 +372,15 @@ static void ui_scan(void)
                              CC_ALERT_CAP - count, NULL, deadline);
     count += ui_append_alerts(count, CC_ALERT_CAP, added);
 
+    added = cc_network_scan((const struct cc_config_s *)&g.cfg, g.ioc,
+                            vt_live, buffer + count, CC_ALERT_CAP - count,
+                            deadline);
+    count += ui_append_alerts(count, CC_ALERT_CAP, added);
+
     rows = (ui_row_t *)calloc((size_t)(count > 0 ? count : 1), sizeof(*rows));
     if (rows == NULL) {
         free(buffer);
-        return;
+        return NULL;
     }
     for (i = 0; i < count; i++) {
         rows[i].alert = buffer[i];
@@ -358,13 +393,138 @@ static void ui_scan(void)
     }
     qsort(rows, (size_t)count, sizeof(*rows), ui_compare_score);
 
-    free(g.rows);
-    g.rows = rows;
-    g.row_count = count;
+    result = (ui_scan_result_t *)calloc(1, sizeof(*result));
+    if (result == NULL) {
+        free(rows);
+        free(buffer);
+        return NULL;
+    }
+    result->rows = rows;
+    result->count = count;
     free(buffer);
+    return result;
+}
 
-    ui_fill_list();
-    ui_update_status();
+static void ui_free_result(ui_scan_result_t *result)
+{
+    if (result == NULL) {
+        return;
+    }
+    free(result->rows);
+    free(result);
+}
+
+static DWORD WINAPI ui_scan_thread_proc(LPVOID param)
+{
+    HANDLE waits[2];
+
+    (void)param;
+    waits[0] = g.scan_event;
+    waits[1] = g.stop_event;
+    for (;;) {
+        DWORD rc = WaitForMultipleObjects(2, waits, FALSE, INFINITE);
+
+        if (rc == WAIT_OBJECT_0 + 1) {
+            break;
+        }
+        if (rc != WAIT_OBJECT_0) {
+            continue;
+        }
+        if (InterlockedExchange(&g.scan_pending, 0) == 0) {
+            continue;
+        }
+        if (InterlockedCompareExchange(&g.scan_busy, 1, 0) != 0) {
+            continue;
+        }
+        {
+            bool vt_live = InterlockedExchange(&g.vt_live_request, 0) != 0;
+            ui_scan_result_t *result = ui_scan_collect(vt_live);
+            bool posted = false;
+
+            if (result != NULL) {
+                if (InterlockedCompareExchange(&g.shutdown, 0, 0) == 0 &&
+                    g.hwnd != NULL) {
+                    posted = PostMessageW(g.hwnd, WM_APP_SCAN_DONE, 0,
+                                          (LPARAM)result) ? true : false;
+                }
+                if (!posted) {
+                    ui_free_result(result);
+                }
+            }
+            InterlockedExchange(&g.scan_busy, 0);
+        }
+    }
+    return 0;
+}
+
+static bool ui_start_worker(HWND hwnd)
+{
+    g.hwnd = hwnd;
+    g.scan_event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    g.stop_event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    if (g.scan_event == NULL || g.stop_event == NULL) {
+        return false;
+    }
+    g.scan_thread = CreateThread(NULL, 0, ui_scan_thread_proc, NULL, 0, NULL);
+    return g.scan_thread != NULL;
+}
+
+static void ui_stop_worker(HWND hwnd)
+{
+    MSG msg;
+
+    InterlockedExchange(&g.shutdown, 1);
+    if (g.stop_event != NULL) {
+        (void)SetEvent(g.stop_event);
+    }
+    if (g.scan_thread != NULL) {
+        (void)WaitForSingleObject(g.scan_thread, INFINITE);
+        (void)CloseHandle(g.scan_thread);
+        g.scan_thread = NULL;
+    }
+    while (PeekMessageW(&msg, hwnd, WM_APP_SCAN_DONE, WM_APP_SCAN_DONE,
+                        PM_REMOVE)) {
+        ui_free_result((ui_scan_result_t *)msg.lParam);
+    }
+    if (g.scan_event != NULL) {
+        (void)CloseHandle(g.scan_event);
+        g.scan_event = NULL;
+    }
+    if (g.stop_event != NULL) {
+        (void)CloseHandle(g.stop_event);
+        g.stop_event = NULL;
+    }
+}
+
+static void ui_request_scan(bool vt_live)
+{
+    if (g.scan_event == NULL ||
+        InterlockedCompareExchange(&g.shutdown, 0, 0) != 0) {
+        return;
+    }
+    if (vt_live) {
+        InterlockedExchange(&g.vt_live_request, 1);
+    }
+    if (InterlockedCompareExchange(&g.scan_pending, 1, 0) == 0) {
+        (void)SetEvent(g.scan_event);
+    }
+}
+
+static void ui_apply_scan_result(ui_scan_result_t *result)
+{
+    if (result == NULL) {
+        return;
+    }
+    if (result->count >= 0 &&
+        InterlockedCompareExchange(&g.shutdown, 0, 0) == 0) {
+        free(g.rows);
+        g.rows = result->rows;
+        g.row_count = result->count;
+        ui_fill_list();
+        ui_update_status();
+        return;
+    }
+    ui_free_result(result);
 }
 
 static void ui_show_detail(int index)
@@ -418,7 +578,7 @@ static void ui_action(int command)
     int selected;
     DWORD error_code = 0;
     wchar_t action[32];
-    bool ok;
+    bool ok = false;
 
     selected = (int)SendMessageW(g.list, LVM_GETNEXTITEM, (WPARAM)-1,
                                  LVNI_SELECTED);
@@ -427,27 +587,42 @@ static void ui_action(int command)
                     L"cleaner-secure", MB_OK | MB_ICONINFORMATION);
         return;
     }
-    if (g.rows[selected].alert.pid == 0) {
-        MessageBoxW(NULL, L"La alerta seleccionada no tiene PID.",
-                    L"cleaner-secure", MB_OK | MB_ICONINFORMATION);
-        return;
-    }
 
-    switch (command) {
-    case ID_BTN_KILL:
-        ok = cc_kill_process(g.rows[selected].alert.pid, &error_code);
-        wcscpy(action, L"Terminar");
-        break;
-    case ID_BTN_SUSPEND:
-        ok = cc_suspend_process(g.rows[selected].alert.pid, &error_code);
-        wcscpy(action, L"Suspender");
-        break;
-    case ID_BTN_RESUME:
-        ok = cc_resume_process(g.rows[selected].alert.pid, &error_code);
-        wcscpy(action, L"Reanudar");
-        break;
-    default:
-        return;
+    if (command == ID_BTN_BLOCK_IP || command == ID_BTN_UNBLOCK_IP) {
+        if (g.rows[selected].alert.indicator[0] == L'\0') {
+            MessageBoxW(NULL, L"La alerta seleccionada no tiene una IP.",
+                        L"cleaner-secure", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+        if (command == ID_BTN_BLOCK_IP) {
+            ok = cc_block_ip(g.rows[selected].alert.indicator, &error_code);
+            wcscpy(action, L"Bloquear IP");
+        } else {
+            ok = cc_unblock_ip(g.rows[selected].alert.indicator, &error_code);
+            wcscpy(action, L"Desbloquear IP");
+        }
+    } else {
+        if (g.rows[selected].alert.pid == 0) {
+            MessageBoxW(NULL, L"La alerta seleccionada no tiene PID.",
+                        L"cleaner-secure", MB_OK | MB_ICONINFORMATION);
+            return;
+        }
+        switch (command) {
+        case ID_BTN_KILL:
+            ok = cc_kill_process(g.rows[selected].alert.pid, &error_code);
+            wcscpy(action, L"Terminar");
+            break;
+        case ID_BTN_SUSPEND:
+            ok = cc_suspend_process(g.rows[selected].alert.pid, &error_code);
+            wcscpy(action, L"Suspender");
+            break;
+        case ID_BTN_RESUME:
+            ok = cc_resume_process(g.rows[selected].alert.pid, &error_code);
+            wcscpy(action, L"Reanudar");
+            break;
+        default:
+            return;
+        }
     }
     if (!ok) {
         wchar_t err_text[256];
@@ -463,7 +638,7 @@ static void ui_layout(int width, int height)
     const int gap = 6;
     const int margin = 8;
     LVCOLUMNW col;
-    HWND buttons[6];
+    HWND buttons[8];
     int count = 0;
     int list_w;
     int list_h;
@@ -471,11 +646,11 @@ static void ui_layout(int width, int height)
     int last_w;
     int i;
 
-    if (width < 240) {
-        width = 240;
+    if (width < 560) {
+        width = 560;
     }
-    if (height < 260) {
-        height = 260;
+    if (height < 300) {
+        height = 300;
     }
     list_w = width - margin * 2;
     list_h = height - 130;
@@ -490,6 +665,8 @@ static void ui_layout(int width, int height)
     buttons[count++] = g.btn_kill;
     buttons[count++] = g.btn_suspend;
     buttons[count++] = g.btn_resume;
+    buttons[count++] = g.btn_block_ip;
+    buttons[count++] = g.btn_unblock_ip;
     buttons[count++] = g.btn_elev;
     if (g.btn_runas != NULL) {
         buttons[count++] = g.btn_runas;
@@ -578,19 +755,23 @@ static bool ui_create_controls(HWND hwnd)
                                  (HMENU)(INT_PTR)ID_CHK_AUTO,
                                  GetModuleHandleW(NULL), NULL);
     g.btn_scan = ui_create_button(hwnd, ID_BTN_SCAN, L"Analizar ahora", 8, 618,
-                                  170, 28);
-    g.btn_kill = ui_create_button(hwnd, ID_BTN_KILL, L"Terminar", 186, 618,
-                                  170, 28);
-    g.btn_suspend = ui_create_button(hwnd, ID_BTN_SUSPEND, L"Suspender", 364,
-                                     618, 170, 28);
-    g.btn_resume = ui_create_button(hwnd, ID_BTN_RESUME, L"Reanudar", 542, 618,
-                                    170, 28);
-    g.btn_elev = ui_create_button(hwnd, ID_BTN_ELEV, L"Elevación", 720, 618,
-                                  170, 28);
+                                   130, 28);
+    g.btn_kill = ui_create_button(hwnd, ID_BTN_KILL, L"Terminar", 146, 618,
+                                   120, 28);
+    g.btn_suspend = ui_create_button(hwnd, ID_BTN_SUSPEND, L"Suspender", 274,
+                                      618, 120, 28);
+    g.btn_resume = ui_create_button(hwnd, ID_BTN_RESUME, L"Reanudar", 402, 618,
+                                     120, 28);
+    g.btn_block_ip = ui_create_button(hwnd, ID_BTN_BLOCK_IP, L"Bloquear IP",
+                                       530, 618, 130, 28);
+    g.btn_unblock_ip = ui_create_button(hwnd, ID_BTN_UNBLOCK_IP,
+                                         L"Desbloquear IP", 668, 618, 140, 28);
+    g.btn_elev = ui_create_button(hwnd, ID_BTN_ELEV, L"Elevación", 816, 618,
+                                   120, 28);
     if (!g.elevated) {
         g.btn_runas = ui_create_button(hwnd, ID_BTN_RUNAS,
                                        L"Reiniciar como administrador",
-                                       898, 618, 194, 28);
+                                       944, 618, 148, 28);
     }
     g.status = CreateWindowExW(0, L"Static", L"", WS_CHILD | WS_VISIBLE |
                                SS_LEFT | SS_SUNKEN,
@@ -599,8 +780,10 @@ static bool ui_create_controls(HWND hwnd)
                                GetModuleHandleW(NULL), NULL);
 
     if (g.chk_auto == NULL || g.btn_scan == NULL || g.btn_kill == NULL ||
-        g.btn_suspend == NULL || g.btn_resume == NULL || g.btn_elev == NULL ||
-        g.status == NULL || (!g.elevated && g.btn_runas == NULL)) {
+        g.btn_suspend == NULL || g.btn_resume == NULL ||
+        g.btn_block_ip == NULL || g.btn_unblock_ip == NULL ||
+        g.btn_elev == NULL || g.status == NULL ||
+        (!g.elevated && g.btn_runas == NULL)) {
         return false;
     }
     (void)SendMessageW(g.chk_auto, WM_SETFONT, (WPARAM)g.font, TRUE);
@@ -608,6 +791,8 @@ static bool ui_create_controls(HWND hwnd)
     (void)SendMessageW(g.btn_kill, WM_SETFONT, (WPARAM)g.font, TRUE);
     (void)SendMessageW(g.btn_suspend, WM_SETFONT, (WPARAM)g.font, TRUE);
     (void)SendMessageW(g.btn_resume, WM_SETFONT, (WPARAM)g.font, TRUE);
+    (void)SendMessageW(g.btn_block_ip, WM_SETFONT, (WPARAM)g.font, TRUE);
+    (void)SendMessageW(g.btn_unblock_ip, WM_SETFONT, (WPARAM)g.font, TRUE);
     (void)SendMessageW(g.btn_elev, WM_SETFONT, (WPARAM)g.font, TRUE);
     if (g.btn_runas != NULL) {
         (void)SendMessageW(g.btn_runas, WM_SETFONT, (WPARAM)g.font, TRUE);
@@ -680,13 +865,20 @@ static LRESULT CALLBACK ui_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam,
         if (SetTimer(hwnd, ID_TIMER, g.timer_ms, NULL) == 0) {
             SetTimer(hwnd, ID_TIMER, 2000, NULL);
         }
-        ui_scan();
+        if (!ui_start_worker(hwnd)) {
+            return -1;
+        }
+        ui_request_scan(false);
+        return 0;
+
+    case WM_APP_SCAN_DONE:
+        ui_apply_scan_result((ui_scan_result_t *)lParam);
         return 0;
 
     case WM_TIMER:
         if (wParam == ID_TIMER &&
             SendMessageW(g.chk_auto, BM_GETCHECK, 0, 0) == BST_CHECKED) {
-            ui_scan();
+            ui_request_scan(false);
         }
         return 0;
 
@@ -694,11 +886,13 @@ static LRESULT CALLBACK ui_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam,
         if (HIWORD(wParam) == BN_CLICKED) {
             switch (LOWORD(wParam)) {
             case ID_BTN_SCAN:
-                ui_scan();
+                ui_request_scan(true);
                 break;
             case ID_BTN_KILL:
             case ID_BTN_SUSPEND:
             case ID_BTN_RESUME:
+            case ID_BTN_BLOCK_IP:
+            case ID_BTN_UNBLOCK_IP:
                 ui_action(LOWORD(wParam));
                 break;
             case ID_BTN_ELEV:
@@ -735,6 +929,7 @@ static LRESULT CALLBACK ui_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam,
 
     case WM_DESTROY:
         KillTimer(hwnd, ID_TIMER);
+        ui_stop_worker(hwnd);
         ui_free_state();
         PostQuitMessage(0);
         return 0;
@@ -771,7 +966,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = ui_wnd_proc;
     wc.hInstance = hInstance;
-    wc.hIcon = LoadIconW(NULL, MAKEINTRESOURCEW(CC_IDI_APPLICATION));
+    wc.hIcon = LoadIconW(hInstance, MAKEINTRESOURCEW(CC_IDI_APPLICATION));
     wc.hCursor = LoadCursorW(NULL, MAKEINTRESOURCEW(CC_IDC_ARROW));
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszClassName = class_name;
@@ -790,7 +985,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         y = 0;
     }
     hwnd = CreateWindowExW(0, class_name,
-                           L"cleaner-secure — Monitor de procesos y servicios",
+                           L"cleaner-secure — Monitor de procesos, servicios y red",
                            WS_OVERLAPPEDWINDOW, x, y, 1100, 700, NULL, NULL,
                            hInstance, NULL);
     if (hwnd == NULL) {

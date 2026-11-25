@@ -9,7 +9,14 @@ typedef struct cc_config_s {
     uint64_t ram_bytes_threshold;     /* e.g. 1.5 GB */
     uint32_t handle_threshold;        /* e.g. 4000 */
     uint64_t io_bytes_threshold;      /* e.g. 500 MB */
+    bool     network_enabled;
+    uint32_t network_max_conns_per_pid;
+    uint32_t network_max_unique_ips_per_pid;
+    uint32_t network_max_listen_ports_per_pid;
+    bool     network_vt_enabled;
+    uint32_t network_vt_max_lookups;
     bool     vt_enabled;
+    bool     vt_auto_lookup;
     uint32_t vt_requests_per_minute;  /* e.g. 4 */
     uint32_t scan_timeout_ms;         /* e.g. 2000 */
     char     vt_api_key[128];

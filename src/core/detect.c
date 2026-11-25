@@ -160,7 +160,8 @@ static int trust_cache_find(cc_trust_cache_t *c, const wchar_t *path)
     return -1;
 }
 
-const cc_trust_result_t *cc_trust_cache_get(cc_trust_cache_t *c, const wchar_t *path)
+const cc_trust_result_t *cc_trust_cache_get(cc_trust_cache_t *c, const wchar_t *path,
+                                            bool vt_live)
 {
     int idx;
     cc_trust_result_t tr;
@@ -173,7 +174,7 @@ const cc_trust_result_t *cc_trust_cache_get(cc_trust_cache_t *c, const wchar_t *
     tr.virustotal_total = -1;
     (void)cc_trust_verify(path, &tr);
     if (tr.signature_valid && tr.hash_sha256[0] != '\0') {
-        (void)cc_virustotal_lookup(tr.hash_sha256, &tr);
+        (void)cc_virustotal_lookup_ex(tr.hash_sha256, &tr, vt_live);
     }
     idx = c->count++;
     c->items[idx].used = true;
@@ -271,6 +272,7 @@ int cc_detect_processes(const cc_detect_ctx_t *ctx, cc_alert_t *out, int cap,
     int proc_n = 0;
     int svc_n = 0;
     int count = 0;
+    int live_budget;
     int i;
     int k;
     DWORD self_pid;
@@ -280,6 +282,7 @@ int cc_detect_processes(const cc_detect_ctx_t *ctx, cc_alert_t *out, int cap,
     if (procs == NULL) return 0;
     proc_n = cc_proc_list(procs, CC_MAX_PROCS);
     self_pid = GetCurrentProcessId();
+    live_budget = ctx->vt_live_budget;
     cache = ctx->trust_cache;
     if (cache == NULL) {
         local_cache = cc_trust_cache_create();
@@ -338,7 +341,12 @@ int cc_detect_processes(const cc_detect_ctx_t *ctx, cc_alert_t *out, int cap,
 
         if (p->path[0] != L'\0' && cache != NULL && GetTickCount64() < deadline &&
             !path_in_protected_dir(p->path)) {
-            const cc_trust_result_t *tr = cc_trust_cache_get(cache, p->path);
+            bool allow_live = ctx->vt_live && live_budget > 0;
+            const cc_trust_result_t *tr;
+            if (allow_live) {
+                live_budget--;
+            }
+            tr = cc_trust_cache_get(cache, p->path, allow_live);
             if (tr != NULL) {
                 bool trusted_pub = tr->publisher[0] != L'\0' && ctx->pubs != NULL && cc_publishers_is_trusted(ctx->pubs, tr->publisher);
                 if (!tr->signature_valid && !path_in_protected_dir(p->path)) {
@@ -421,7 +429,8 @@ int cc_alert_score(cc_risk_t risk, const char *category)
     default: score = 0; break;
     }
     if (category != NULL) {
-        if (strcmp(category, "ioc") == 0 || strcmp(category, "signature") == 0) score += 5;
+        if (strcmp(category, "ioc") == 0 || strcmp(category, "signature") == 0 ||
+            strcmp(category, "network") == 0) score += 5;
     }
     if (score > 100) score = 100;
     return score;
