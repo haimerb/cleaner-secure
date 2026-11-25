@@ -11,6 +11,7 @@
 #include "detect.h"
 #include "registry_scan.h"
 #include "eventlog_scan.h"
+#include "network_scan.h"
 #include "response.h"
 #include "trust.h"
 #include "metrics.h"
@@ -34,7 +35,9 @@ typedef enum {
     CC_ACTION_SUSPEND,
     CC_ACTION_RESUME,
     CC_ACTION_SERVICE_STOP,
-    CC_ACTION_SERVICE_START
+    CC_ACTION_SERVICE_START,
+    CC_ACTION_BLOCK_IP,
+    CC_ACTION_UNBLOCK_IP
 } cc_action_t;
 
 typedef struct {
@@ -44,6 +47,7 @@ typedef struct {
     cc_action_t action;
     uint32_t pid;
     wchar_t service[CC_MAX_NAME];
+    wchar_t ip[64];
 } cc_options_t;
 
 typedef struct {
@@ -70,7 +74,8 @@ static void cc_usage(const char *prog)
     fprintf(stdout,
             "Usage: %s [--once] [--interval <sec>] [--json] [--kill <pid>] "
             "[--suspend <pid>] [--resume <pid>] [--service-stop <name>] "
-            "[--service-start <name>] [--help]\n",
+            "[--service-start <name>] [--block-ip <ip>] "
+            "[--unblock-ip <ip>] [--help]\n",
             prog);
 }
 
@@ -102,6 +107,7 @@ static void cc_options_init(cc_options_t *opts)
     opts->action = CC_ACTION_NONE;
     opts->pid = 0;
     opts->service[0] = L'\0';
+    opts->ip[0] = L'\0';
 }
 
 static bool cc_parse_args(int argc, wchar_t **argv, cc_options_t *opts,
@@ -133,14 +139,27 @@ static bool cc_parse_args(int argc, wchar_t **argv, cc_options_t *opts,
             wcscmp(argv[i], L"--suspend") == 0 ||
             wcscmp(argv[i], L"--resume") == 0 ||
             wcscmp(argv[i], L"--service-stop") == 0 ||
-            wcscmp(argv[i], L"--service-start") == 0) {
+            wcscmp(argv[i], L"--service-start") == 0 ||
+            wcscmp(argv[i], L"--block-ip") == 0 ||
+            wcscmp(argv[i], L"--unblock-ip") == 0) {
             if (i + 1 >= argc) {
                 fprintf(stderr, "Missing value for %s\n", arg);
                 return false;
             }
             cc_wide_to_utf8(argv[i + 1], val, sizeof(val));
-            if (wcscmp(argv[i], L"--service-stop") == 0 ||
-                wcscmp(argv[i], L"--service-start") == 0) {
+            if (wcscmp(argv[i], L"--block-ip") == 0 ||
+                wcscmp(argv[i], L"--unblock-ip") == 0) {
+                if (argv[i + 1][0] == L'\0' ||
+                    wcslen(argv[i + 1]) >= sizeof(opts->ip) / sizeof(opts->ip[0])) {
+                    fprintf(stderr, "Invalid value for %s: %s\n", arg, val);
+                    return false;
+                }
+                wcscpy(opts->ip, argv[i + 1]);
+                opts->action = wcscmp(argv[i], L"--block-ip") == 0
+                                   ? CC_ACTION_BLOCK_IP
+                                   : CC_ACTION_UNBLOCK_IP;
+            } else if (wcscmp(argv[i], L"--service-stop") == 0 ||
+                       wcscmp(argv[i], L"--service-start") == 0) {
                 if (argv[i + 1][0] == L'\0' ||
                     wcslen(argv[i + 1]) >= CC_MAX_NAME) {
                     fprintf(stderr, "Invalid value for %s: %s\n", arg, val);
@@ -316,11 +335,13 @@ static int cc_execute_action(const cc_options_t *opts, FILE *out)
 {
     char label[160];
     char service[CC_MAX_NAME * 4 + 1];
+    char ip[64 * 4 + 1];
     DWORD err;
     DWORD code;
     bool ok;
 
     cc_wide_to_utf8(opts->service, service, sizeof(service));
+    cc_wide_to_utf8(opts->ip, ip, sizeof(ip));
     err = 0;
     ok = false;
     switch (opts->action) {
@@ -365,6 +386,22 @@ static int cc_execute_action(const cc_options_t *opts, FILE *out)
             fprintf(out, "Started service %s\n", service);
         } else {
             (void)snprintf(label, sizeof(label), "start service %s", service);
+        }
+        break;
+    case CC_ACTION_BLOCK_IP:
+        ok = cc_block_ip(opts->ip, &err);
+        if (ok) {
+            fprintf(out, "Blocked IP %s\n", ip);
+        } else {
+            (void)snprintf(label, sizeof(label), "block IP %s", ip);
+        }
+        break;
+    case CC_ACTION_UNBLOCK_IP:
+        ok = cc_unblock_ip(opts->ip, &err);
+        if (ok) {
+            fprintf(out, "Unblocked IP %s\n", ip);
+        } else {
+            (void)snprintf(label, sizeof(label), "unblock IP %s", ip);
         }
         break;
     default:
@@ -529,6 +566,7 @@ static void cc_print_json(FILE *out, const char *timestamp, uint32_t pid,
                           int total_processes, const cc_view_t *views, int count)
 {
     char target[CC_MAX_NAME * 4 + 1];
+    char indicator[64 * 4 + 1];
     int i;
 
     fputs("{\"timestamp\":", out);
@@ -550,6 +588,9 @@ static void cc_print_json(FILE *out, const char *timestamp, uint32_t pid,
         cc_json_string(out, target);
         fputs(",\"reason\":", out);
         cc_json_string(out, views[i].alert.reason);
+        fputs(",\"indicator\":", out);
+        cc_wide_to_utf8(views[i].alert.indicator, indicator, sizeof(indicator));
+        cc_json_string(out, indicator);
         fputs(",\"score\":", out);
         fprintf(out, "%d", views[i].score);
         fputc('}', out);
@@ -593,6 +634,18 @@ static int cc_scan_once(cc_detect_ctx_t *ctx, const cc_ioc_t *ioc,
     if (count < cap) {
         added = cc_eventlog_scan(eventlog_window_minutes, alerts + count,
                                  cap - count, NULL, deadline);
+        if (added < 0) {
+            added = 0;
+        }
+        if (added > cap - count) {
+            added = cap - count;
+        }
+        count += added;
+    }
+    if (count < cap) {
+        added = cc_network_scan(ctx != NULL ? ctx->cfg : NULL, ioc,
+                                ctx != NULL && ctx->vt_live, alerts + count,
+                                cap - count, deadline);
         if (added < 0) {
             added = 0;
         }
@@ -735,6 +788,15 @@ static int cc_main_wide(int argc, wchar_t **argv)
     ctx.metrics = metrics;
     ctx.trust_cache = trust_cache;
     ctx.alert_count = 0;
+    ctx.vt_live = opts.once;
+    ctx.vt_live_budget = 0;
+    if (opts.once && cfg.vt_api_key[0] != L'\0') {
+        uint32_t cap = cfg.network_vt_max_lookups;
+        if (cap > 64) {
+            cap = 64;
+        }
+        ctx.vt_live_budget = (int)cap;
+    }
     (void)SetConsoleCtrlHandler(cc_ctrl_handler, TRUE);
 
     while (!g_stop) {

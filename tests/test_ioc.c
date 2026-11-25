@@ -1,5 +1,7 @@
 #include "ioc.h"
 
+#include <winsock2.h>
+#include <ws2tcpip.h>
 #include <stdio.h>
 #include <wchar.h>
 
@@ -94,5 +96,38 @@ const char *test_ioc_publishers(void)
     ASSERT_TRUE(!cc_publishers_is_trusted(pubs, L"Evil Corp"), "Evil Corp trusted");
 
     cc_publishers_free(pubs);
+    return NULL;
+}
+
+const char *test_ioc_network(void)
+{
+    wchar_t path[CC_MAX_PATH_LEN];
+    cc_ioc_t *ioc;
+
+    ASSERT_TRUE(write_temp_file(L"cc_test_iocs_network.json", path,
+                                CC_MAX_PATH_LEN,
+        "{\"process_names\":[],\"path_substrings\":[],"
+        "\"hashes_sha256\":[],\"service_names\":[],"
+        "\"service_path_substrings\":[],"
+        "\"malicious_ips\":[\"45.77.1.2\"],"
+        "\"suspicious_ports\":[4444,\"6667\"]}"),
+        "create temp network iocs.json");
+
+    ioc = cc_ioc_load(path);
+    DeleteFileW(path);
+    ASSERT_TRUE(ioc != NULL, "cc_ioc_load returned NULL for network IOCs");
+
+    ASSERT_TRUE(cc_ioc_is_malicious_ipv4(ioc, inet_addr("45.77.1.2")),
+                "malicious IP not matched");
+    ASSERT_TRUE(!cc_ioc_is_malicious_ipv4(ioc, inet_addr("8.8.8.8")),
+                "benign IP matched");
+    ASSERT_TRUE(cc_ioc_is_suspicious_port(ioc, 4444),
+                "numeric suspicious port not matched");
+    ASSERT_TRUE(cc_ioc_is_suspicious_port(ioc, 6667),
+                "string suspicious port not matched");
+    ASSERT_TRUE(!cc_ioc_is_suspicious_port(ioc, 443),
+                "benign port matched");
+
+    cc_ioc_free(ioc);
     return NULL;
 }

@@ -15,6 +15,8 @@ typedef struct {
     const struct cc_publishers_s *pubs;
     struct cc_metrics_s         *metrics; /* shared sampler for CPU deltas */
     struct cc_trust_cache_s     *trust_cache;
+    bool                         vt_live;
+    int                          vt_live_budget;
     int alert_count;
 } cc_detect_ctx_t;
 
@@ -40,6 +42,7 @@ int cc_alert_score(cc_risk_t risk, const char *category);
 typedef struct cc_trust_cache_s cc_trust_cache_t;
 cc_trust_cache_t *cc_trust_cache_create(void);
 void cc_trust_cache_free(cc_trust_cache_t *c);
-const cc_trust_result_t *cc_trust_cache_get(cc_trust_cache_t *c, const wchar_t *path);
+const cc_trust_result_t *cc_trust_cache_get(cc_trust_cache_t *c, const wchar_t *path,
+                                            bool vt_live);
 
 #endif /* CC_DETECT_H */

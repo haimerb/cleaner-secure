@@ -25,6 +25,8 @@
     "\\temp\\",
     "\\users\\public\\"
   ],
+  "malicious_ips": [],
+  "suspicious_ports": [23, 1337, 4444, 5555, 6666, 6667, 9001, 31337],
   "suspicious_parents": {
     "winword.exe": ["cmd.exe", "powershell.exe", "wscript.exe", "cscript.exe"],
     "excel.exe": ["cmd.exe", "powershell.exe", "wscript.exe"],
