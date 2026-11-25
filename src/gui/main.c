@@ -11,6 +11,7 @@
 #include "ioc.h"
 #include "json.h"
 #include "metrics.h"
+#include "proc.h"
 #include "registry_scan.h"
 #include "eventlog_scan.h"
 #include "network_scan.h"
@@ -23,6 +24,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <wchar.h>
+#include <wctype.h>
 
 #define ID_LIST 100
 #define ID_STATUS 101
@@ -35,12 +37,28 @@
 #define ID_CHK_AUTO 108
 #define ID_BTN_BLOCK_IP 109
 #define ID_BTN_UNBLOCK_IP 110
+#define ID_TABS 111
+#define ID_PROC_LIST 112
+#define ID_SEARCH 113
+#define ID_FILTER 114
+#define ID_PROGRESS 115
 #define ID_TIMER 1
 #define WM_APP_SCAN_DONE (WM_APP + 1)
 #define CC_ALERT_CAP 1024
 #define CC_COL_REASON 6
+#define CC_PROC_COL_COUNT 9
+#define CC_VIEW_ALERTS 0
+#define CC_VIEW_PROCESSES 1
 #define CC_IDI_APPLICATION 100
 #define CC_IDC_ARROW 32512
+
+#ifndef PBS_MARQUEE
+#define PBS_MARQUEE 0x0008
+#endif
+
+#ifndef TCS_TOP
+#define TCS_TOP 0
+#endif
 
 typedef struct {
     cc_alert_t alert;
@@ -50,12 +68,27 @@ typedef struct {
 } ui_row_t;
 
 typedef struct {
+    const wchar_t *text;
+    int width;
+} ui_column_def_t;
+
+typedef struct {
     ui_row_t *rows;
     int count;
+    cc_process_view_t *processes;
+    int process_count;
+    int process_total;
+    int analyzed;
+    bool ok;
 } ui_scan_result_t;
 
 typedef struct {
+    HWND tabs;
     HWND list;
+    HWND proc_list;
+    HWND search;
+    HWND filter;
+    HWND progress;
     HWND status;
     HWND btn_scan;
     HWND btn_kill;
@@ -80,9 +113,20 @@ typedef struct {
     cc_publishers_t *pubs;
     cc_metrics_t *metrics;
     cc_metrics_t *view_metrics;
+    cc_metrics_t *inventory_metrics;
     cc_trust_cache_t *cache;
     ui_row_t *rows;
+    cc_process_view_t *processes;
     int row_count;
+    int process_count;
+    int process_total;
+    int analyzed;
+    int view;
+    int sort_column;
+    bool sort_desc;
+    int filter_index;
+    wchar_t search_text[128];
+    wchar_t last_scan[32];
     bool elevated;
     UINT timer_ms;
     int eventlog_minutes;
@@ -141,6 +185,22 @@ static void ui_utf8_to_wide(const char *src, wchar_t *dst, size_t cap)
     if (written <= 0) {
         dst[0] = L'\0';
     }
+}
+
+static void ui_wstr_copy(wchar_t *dst, size_t cap, const wchar_t *src)
+{
+    size_t i = 0;
+
+    if (dst == NULL || cap == 0) {
+        return;
+    }
+    if (src != NULL) {
+        while (i + 1 < cap && src[i] != L'\0') {
+            dst[i] = src[i];
+            i++;
+        }
+    }
+    dst[i] = L'\0';
 }
 
 static const wchar_t *ui_risk_name(cc_risk_t risk)
@@ -211,6 +271,155 @@ static void ui_load_timing(const wchar_t *config_dir)
     g.eventlog_minutes = (int)minutes;
 }
 
+static int ui_string_cmp(const wchar_t *a, const wchar_t *b)
+{
+    size_t i = 0;
+
+    if (a == NULL) {
+        a = L"";
+    }
+    if (b == NULL) {
+        b = L"";
+    }
+    for (;;) {
+        wchar_t ca = (wchar_t)towlower((wint_t)a[i]);
+        wchar_t cb = (wchar_t)towlower((wint_t)b[i]);
+
+        if (ca != cb) {
+            return ca < cb ? -1 : 1;
+        }
+        if (ca == L'\0') {
+            return 0;
+        }
+        i++;
+    }
+}
+
+static bool ui_contains_i(const wchar_t *hay, const wchar_t *needle)
+{
+    if (hay == NULL || needle == NULL || needle[0] == L'\0') {
+        return false;
+    }
+    return wcsstr(hay, needle) != NULL;
+}
+
+static void ui_lower_copy(wchar_t *dst, size_t cap, const wchar_t *src)
+{
+    size_t i = 0;
+
+    if (dst == NULL || cap == 0) {
+        return;
+    }
+    if (src != NULL) {
+        while (i + 1 < cap && src[i] != L'\0') {
+            dst[i] = (wchar_t)towlower((wint_t)src[i]);
+            i++;
+        }
+    }
+    dst[i] = L'\0';
+}
+
+static bool ui_matches_search(const wchar_t *text)
+{
+    wchar_t hay[2048];
+    wchar_t needle[160];
+
+    if (g.search_text[0] == L'\0') {
+        return true;
+    }
+    ui_lower_copy(hay, sizeof(hay) / sizeof(hay[0]), text);
+    ui_lower_copy(needle, sizeof(needle) / sizeof(needle[0]), g.search_text);
+    return ui_contains_i(hay, needle);
+}
+
+static bool ui_alert_matches(const ui_row_t *row)
+{
+    wchar_t category[64];
+    wchar_t reason[CC_MAX_REASON * 2];
+    wchar_t pid_text[32];
+
+    if (row == NULL) {
+        return false;
+    }
+    if (g.filter_index > 0) {
+        cc_risk_t wanted = CC_RISK_NONE;
+        if (g.filter_index == 1) {
+            wanted = CC_RISK_CRITICAL;
+        } else if (g.filter_index == 2) {
+            wanted = CC_RISK_HIGH;
+        } else if (g.filter_index == 3) {
+            wanted = CC_RISK_MEDIUM;
+        } else if (g.filter_index == 4) {
+            wanted = CC_RISK_LOW;
+        }
+        if (row->alert.risk != wanted) {
+            return false;
+        }
+    }
+    if (g.search_text[0] == L'\0') {
+        return true;
+    }
+    ui_utf8_to_wide(row->alert.category, category,
+                    sizeof(category) / sizeof(category[0]));
+    ui_utf8_to_wide(row->alert.reason, reason,
+                    sizeof(reason) / sizeof(reason[0]));
+    swprintf(pid_text, sizeof(pid_text) / sizeof(pid_text[0]), L"%lu",
+             (unsigned long)row->alert.pid);
+    return ui_matches_search(row->alert.target) ||
+           ui_matches_search(category) || ui_matches_search(reason) ||
+           ui_matches_search(row->alert.indicator) ||
+           ui_matches_search(pid_text);
+}
+
+static bool ui_pid_has_alert(uint32_t pid)
+{
+    int i;
+
+    if (pid == 0) {
+        return false;
+    }
+    for (i = 0; i < g.row_count; i++) {
+        if (g.rows[i].alert.pid == pid) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static bool ui_process_matches(const cc_process_view_t *view)
+{
+    wchar_t pid_text[32];
+    wchar_t parent_text[32];
+    wchar_t session_text[32];
+    bool alerted;
+
+    if (view == NULL) {
+        return false;
+    }
+    if (g.filter_index == 1 || g.filter_index == 2) {
+        alerted = ui_pid_has_alert(view->info.pid);
+        if ((g.filter_index == 1 && !alerted) ||
+            (g.filter_index == 2 && alerted)) {
+            return false;
+        }
+    }
+    if (g.search_text[0] == L'\0') {
+        return true;
+    }
+    swprintf(pid_text, sizeof(pid_text) / sizeof(pid_text[0]), L"%lu",
+             (unsigned long)view->info.pid);
+    swprintf(parent_text, sizeof(parent_text) / sizeof(parent_text[0]), L"%lu",
+             (unsigned long)view->info.parent_pid);
+    swprintf(session_text, sizeof(session_text) / sizeof(session_text[0]),
+             L"%lu", (unsigned long)view->info.session_id);
+    return ui_matches_search(view->info.name) ||
+           ui_matches_search(view->info.path) ||
+           ui_matches_search(view->info.user) ||
+           ui_matches_search(view->info.command_line) ||
+           ui_matches_search(pid_text) || ui_matches_search(parent_text) ||
+           ui_matches_search(session_text);
+}
+
 static int ui_compare_score(const void *a, const void *b)
 {
     const ui_row_t *ra = (const ui_row_t *)a;
@@ -225,7 +434,88 @@ static int ui_compare_score(const void *a, const void *b)
     return ra->alert.pid > rb->alert.pid ? 1 : -1;
 }
 
-static void ui_set_subitem(int row, int column, const wchar_t *text)
+static int ui_row_compare_column(const ui_row_t *a, const ui_row_t *b, int col)
+{
+    wchar_t ca[64];
+    wchar_t cb[64];
+
+    switch (col) {
+    case 0:
+        return a->alert.pid < b->alert.pid ? -1
+                                           : (a->alert.pid > b->alert.pid ? 1 : 0);
+    case 1:
+        return ui_string_cmp(a->alert.target, b->alert.target);
+    case 2:
+        return a->cpu < b->cpu ? -1 : (a->cpu > b->cpu ? 1 : 0);
+    case 3:
+        return a->ram_mb < b->ram_mb ? -1 : (a->ram_mb > b->ram_mb ? 1 : 0);
+    case 4:
+        return (int)a->alert.risk - (int)b->alert.risk;
+    case 5:
+        ui_utf8_to_wide(a->alert.category, ca, sizeof(ca) / sizeof(ca[0]));
+        ui_utf8_to_wide(b->alert.category, cb, sizeof(cb) / sizeof(cb[0]));
+        return ui_string_cmp(ca, cb);
+    case 6:
+        ui_utf8_to_wide(a->alert.reason, ca, sizeof(ca) / sizeof(ca[0]));
+        ui_utf8_to_wide(b->alert.reason, cb, sizeof(cb) / sizeof(cb[0]));
+        return ui_string_cmp(ca, cb);
+    default:
+        return 0;
+    }
+}
+
+static int ui_process_compare_column(const cc_process_view_t *a,
+                                     const cc_process_view_t *b, int col)
+{
+    switch (col) {
+    case 0:
+        return a->info.pid < b->info.pid ? -1
+                                         : (a->info.pid > b->info.pid ? 1 : 0);
+    case 1:
+        return ui_string_cmp(a->info.name, b->info.name);
+    case 2:
+        return ui_string_cmp(a->info.user, b->info.user);
+    case 3:
+        return a->info.session_id < b->info.session_id
+                   ? -1
+                   : (a->info.session_id > b->info.session_id ? 1 : 0);
+    case 4:
+        return a->info.parent_pid < b->info.parent_pid
+                   ? -1
+                   : (a->info.parent_pid > b->info.parent_pid ? 1 : 0);
+    case 5:
+        return a->metrics.cpu_percent < b->metrics.cpu_percent
+                   ? -1
+                   : (a->metrics.cpu_percent > b->metrics.cpu_percent ? 1 : 0);
+    case 6:
+        return a->metrics.working_set < b->metrics.working_set
+                   ? -1
+                   : (a->metrics.working_set > b->metrics.working_set ? 1 : 0);
+    case 7:
+        return (int)a->info.integrity - (int)b->info.integrity;
+    case 8:
+        return ui_string_cmp(a->info.path, b->info.path);
+    default:
+        return 0;
+    }
+}
+
+static int ui_row_sort(const void *a, const void *b)
+{
+    int rc = ui_row_compare_column((const ui_row_t *)a, (const ui_row_t *)b,
+                                   g.sort_column);
+    return g.sort_desc ? -rc : rc;
+}
+
+static int ui_process_sort(const void *a, const void *b)
+{
+    int rc = ui_process_compare_column((const cc_process_view_t *)a,
+                                       (const cc_process_view_t *)b,
+                                       g.sort_column);
+    return g.sort_desc ? -rc : rc;
+}
+
+static void ui_set_subitem(HWND list, int row, int column, const wchar_t *text)
 {
     LVITEMW item;
 
@@ -234,7 +524,7 @@ static void ui_set_subitem(int row, int column, const wchar_t *text)
     item.iItem = row;
     item.iSubItem = column;
     item.pszText = (LPWSTR)text;
-    (void)SendMessageW(g.list, LVM_SETITEMTEXTW, (WPARAM)row, (LPARAM)&item);
+    (void)SendMessageW(list, LVM_SETITEMTEXTW, (WPARAM)row, (LPARAM)&item);
 }
 
 static void ui_fill_list(void)
@@ -249,53 +539,119 @@ static void ui_fill_list(void)
     wchar_t reason[CC_MAX_REASON * 2];
     LVITEMW item;
     int i;
+    int row = 0;
     int risk_index;
 
     (void)SendMessageW(g.list, WM_SETREDRAW, FALSE, 0);
     (void)SendMessageW(g.list, LVM_DELETEALLITEMS, 0, 0);
     for (i = 0; i < g.row_count; i++) {
-        const ui_row_t *row = &g.rows[i];
+        const ui_row_t *source = &g.rows[i];
 
+        if (!ui_alert_matches(source)) {
+            continue;
+        }
         swprintf(pid_text, sizeof(pid_text) / sizeof(pid_text[0]), L"%lu",
-                 (unsigned long)row->alert.pid);
+                 (unsigned long)source->alert.pid);
         swprintf(cpu_text, sizeof(cpu_text) / sizeof(cpu_text[0]), L"%.1f",
-                 row->cpu);
+                 source->cpu);
         swprintf(ram_text, sizeof(ram_text) / sizeof(ram_text[0]), L"%.1f",
-                 row->ram_mb);
-        ui_utf8_to_wide(row->alert.category, category,
+                 source->ram_mb);
+        ui_utf8_to_wide(source->alert.category, category,
                         sizeof(category) / sizeof(category[0]));
-        ui_utf8_to_wide(row->alert.reason, reason,
+        ui_utf8_to_wide(source->alert.reason, reason,
                         sizeof(reason) / sizeof(reason[0]));
-        risk_index = (int)row->alert.risk;
+        risk_index = (int)source->alert.risk;
         if (risk_index < 0 || risk_index > 4) {
             risk_index = 0;
         }
 
         memset(&item, 0, sizeof(item));
         item.mask = LVIF_TEXT | LVIF_PARAM;
-        item.iItem = i;
+        item.iItem = row;
         item.iSubItem = 0;
         item.pszText = pid_text;
         item.lParam = (LPARAM)i;
         if (SendMessageW(g.list, LVM_INSERTITEMW, 0, (LPARAM)&item) == -1) {
             continue;
         }
-        ui_set_subitem(i, 1, row->alert.target);
-        ui_set_subitem(i, 2, cpu_text);
-        ui_set_subitem(i, 3, ram_text);
-        ui_set_subitem(i, 4, risk_labels[risk_index]);
-        ui_set_subitem(i, 5, category);
-        ui_set_subitem(i, CC_COL_REASON, reason);
+        ui_set_subitem(g.list, row, 1, source->alert.target);
+        ui_set_subitem(g.list, row, 2, cpu_text);
+        ui_set_subitem(g.list, row, 3, ram_text);
+        ui_set_subitem(g.list, row, 4, risk_labels[risk_index]);
+        ui_set_subitem(g.list, row, 5, category);
+        ui_set_subitem(g.list, row, CC_COL_REASON, reason);
+        row++;
     }
     (void)SendMessageW(g.list, WM_SETREDRAW, TRUE, 0);
     InvalidateRect(g.list, NULL, FALSE);
 }
 
+static void ui_fill_proc_list(void)
+{
+    wchar_t pid_text[32];
+    wchar_t parent_text[32];
+    wchar_t session_text[32];
+    wchar_t cpu_text[32];
+    wchar_t ram_text[32];
+    LVITEMW item;
+    int i;
+    int row = 0;
+
+    (void)SendMessageW(g.proc_list, WM_SETREDRAW, FALSE, 0);
+    (void)SendMessageW(g.proc_list, LVM_DELETEALLITEMS, 0, 0);
+    for (i = 0; i < g.process_count; i++) {
+        const cc_process_view_t *source = &g.processes[i];
+
+        if (!ui_process_matches(source)) {
+            continue;
+        }
+        swprintf(pid_text, sizeof(pid_text) / sizeof(pid_text[0]), L"%lu",
+                 (unsigned long)source->info.pid);
+        swprintf(parent_text, sizeof(parent_text) / sizeof(parent_text[0]),
+                 L"%lu", (unsigned long)source->info.parent_pid);
+        swprintf(session_text, sizeof(session_text) / sizeof(session_text[0]),
+                 L"%lu", (unsigned long)source->info.session_id);
+        swprintf(cpu_text, sizeof(cpu_text) / sizeof(cpu_text[0]), L"%.1f",
+                 source->metrics.cpu_percent);
+        swprintf(ram_text, sizeof(ram_text) / sizeof(ram_text[0]), L"%.1f",
+                 (double)source->metrics.working_set / 1048576.0);
+
+        memset(&item, 0, sizeof(item));
+        item.mask = LVIF_TEXT | LVIF_PARAM;
+        item.iItem = row;
+        item.iSubItem = 0;
+        item.pszText = pid_text;
+        item.lParam = (LPARAM)i;
+        if (SendMessageW(g.proc_list, LVM_INSERTITEMW, 0, (LPARAM)&item) == -1) {
+            continue;
+        }
+        ui_set_subitem(g.proc_list, row, 1, source->info.name);
+        ui_set_subitem(g.proc_list, row, 2, source->info.user);
+        ui_set_subitem(g.proc_list, row, 3, session_text);
+        ui_set_subitem(g.proc_list, row, 4, parent_text);
+        ui_set_subitem(g.proc_list, row, 5, cpu_text);
+        ui_set_subitem(g.proc_list, row, 6, ram_text);
+        ui_set_subitem(g.proc_list, row, 7,
+                       cc_integrity_name(source->info.integrity));
+        ui_set_subitem(g.proc_list, row, 8, source->info.path);
+        row++;
+    }
+    (void)SendMessageW(g.proc_list, WM_SETREDRAW, TRUE, 0);
+    InvalidateRect(g.proc_list, NULL, FALSE);
+}
+
+static void ui_fill_all(void)
+{
+    ui_fill_list();
+    ui_fill_proc_list();
+}
+
 static void ui_update_status(void)
 {
-    wchar_t text[256];
+    wchar_t text[512];
     int critical = 0;
     int high = 0;
+    int skipped;
     int i;
 
     for (i = 0; i < g.row_count; i++) {
@@ -305,45 +661,44 @@ static void ui_update_status(void)
             high++;
         }
     }
+    skipped = g.process_total - g.analyzed;
+    if (skipped < 0) {
+        skipped = 0;
+    }
     swprintf(text, sizeof(text) / sizeof(text[0]),
-             L"Alertas: %d | Críticas: %d | Altas: %d | Procesos: %d | Admin: %s",
-             g.row_count, critical, high, g.row_count,
-             g.elevated ? L"SÍ" : L"NO");
+             L"Alertas: %d | Críticas: %d | Altas: %d | Procesos: %d/%d | "
+             L"Analizados: %d | Omitidos: %d | Admin: %s | Última: %s",
+             g.row_count, critical, high, g.process_count, g.process_total,
+             g.analyzed, skipped, g.elevated ? L"SÍ" : L"NO", g.last_scan);
     SetWindowTextW(g.status, text);
-}
-
-static int ui_append_alerts(int used, int cap, int count)
-{
-    if (count < 0) {
-        count = 0;
-    }
-    if (used < 0) {
-        used = 0;
-    }
-    if (count > cap - used) {
-        count = cap - used;
-    }
-    return count;
 }
 
 static ui_scan_result_t *ui_scan_collect(bool vt_live)
 {
-    cc_alert_t *buffer;
-    ui_row_t *rows;
+    cc_alert_t *buffer = NULL;
+    ui_row_t *rows = NULL;
     ui_scan_result_t *result;
     cc_detect_ctx_t ctx;
     cc_proc_metrics_t pm;
     int count = 0;
     int added;
     int i;
+    int total = 0;
+    int analyzed = 0;
     ULONGLONG deadline = GetTickCount64() + 60000;
 
     if (g.cfg.scan_timeout_ms != 0) {
         deadline = GetTickCount64() + (ULONGLONG)g.cfg.scan_timeout_ms;
     }
+    result = (ui_scan_result_t *)calloc(1, sizeof(*result));
+    if (result == NULL) {
+        return NULL;
+    }
+    result->count = -1;
+
     buffer = (cc_alert_t *)calloc(CC_ALERT_CAP, sizeof(*buffer));
     if (buffer == NULL) {
-        return NULL;
+        return result;
     }
 
     memset(&ctx, 0, sizeof(ctx));
@@ -363,24 +718,36 @@ static ui_scan_result_t *ui_scan_collect(bool vt_live)
     }
 
     added = cc_detect_processes(&ctx, buffer, CC_ALERT_CAP, deadline);
-    count += ui_append_alerts(count, CC_ALERT_CAP, added);
+    count += added;
+    if (count > CC_ALERT_CAP) {
+        count = CC_ALERT_CAP;
+    }
 
     added = cc_registry_scan(g.ioc, buffer + count, CC_ALERT_CAP - count, deadline);
-    count += ui_append_alerts(count, CC_ALERT_CAP, added);
+    count += added;
+    if (count > CC_ALERT_CAP) {
+        count = CC_ALERT_CAP;
+    }
 
     added = cc_eventlog_scan(g.eventlog_minutes, buffer + count,
                              CC_ALERT_CAP - count, NULL, deadline);
-    count += ui_append_alerts(count, CC_ALERT_CAP, added);
+    count += added;
+    if (count > CC_ALERT_CAP) {
+        count = CC_ALERT_CAP;
+    }
 
     added = cc_network_scan((const struct cc_config_s *)&g.cfg, g.ioc,
                             vt_live, buffer + count, CC_ALERT_CAP - count,
                             deadline);
-    count += ui_append_alerts(count, CC_ALERT_CAP, added);
+    count += added;
+    if (count > CC_ALERT_CAP) {
+        count = CC_ALERT_CAP;
+    }
 
     rows = (ui_row_t *)calloc((size_t)(count > 0 ? count : 1), sizeof(*rows));
     if (rows == NULL) {
         free(buffer);
-        return NULL;
+        return result;
     }
     for (i = 0; i < count; i++) {
         rows[i].alert = buffer[i];
@@ -393,14 +760,21 @@ static ui_scan_result_t *ui_scan_collect(bool vt_live)
     }
     qsort(rows, (size_t)count, sizeof(*rows), ui_compare_score);
 
-    result = (ui_scan_result_t *)calloc(1, sizeof(*result));
-    if (result == NULL) {
+    result->processes = (cc_process_view_t *)calloc(CC_MAX_PROCS,
+                                                    sizeof(*result->processes));
+    if (result->processes == NULL) {
         free(rows);
         free(buffer);
-        return NULL;
+        return result;
     }
+    result->process_count = cc_proc_inventory_collect(
+        result->processes, CC_MAX_PROCS, &total, &analyzed,
+        g.inventory_metrics, deadline);
+    result->process_total = total;
+    result->analyzed = analyzed;
     result->rows = rows;
     result->count = count;
+    result->ok = true;
     free(buffer);
     return result;
 }
@@ -410,6 +784,7 @@ static void ui_free_result(ui_scan_result_t *result)
     if (result == NULL) {
         return;
     }
+    free(result->processes);
     free(result->rows);
     free(result);
 }
@@ -430,9 +805,7 @@ static DWORD WINAPI ui_scan_thread_proc(LPVOID param)
         if (rc != WAIT_OBJECT_0) {
             continue;
         }
-        if (InterlockedExchange(&g.scan_pending, 0) == 0) {
-            continue;
-        }
+        (void)InterlockedExchange(&g.scan_pending, 0);
         if (InterlockedCompareExchange(&g.scan_busy, 1, 0) != 0) {
             continue;
         }
@@ -496,6 +869,28 @@ static void ui_stop_worker(HWND hwnd)
     }
 }
 
+static void ui_set_scanning(bool scanning)
+{
+    HWND buttons[] = {
+        g.btn_scan, g.btn_kill, g.btn_suspend, g.btn_resume,
+        g.btn_block_ip, g.btn_unblock_ip
+    };
+    size_t i;
+
+    for (i = 0; i < sizeof(buttons) / sizeof(buttons[0]); i++) {
+        if (buttons[i] != NULL) {
+            (void)EnableWindow(buttons[i], !scanning);
+        }
+    }
+    if (g.progress != NULL) {
+        (void)SendMessageW(g.progress, PBM_SETPOS, scanning ? 0 : 100, 0);
+        (void)SendMessageW(g.progress, PBM_SETMARQUEE, (WPARAM)(scanning ? TRUE : FALSE), 0);
+    }
+    if (scanning && g.status != NULL) {
+        SetWindowTextW(g.status, L"Analizando sistema…");
+    }
+}
+
 static void ui_request_scan(bool vt_live)
 {
     if (g.scan_event == NULL ||
@@ -505,9 +900,9 @@ static void ui_request_scan(bool vt_live)
     if (vt_live) {
         InterlockedExchange(&g.vt_live_request, 1);
     }
-    if (InterlockedCompareExchange(&g.scan_pending, 1, 0) == 0) {
-        (void)SetEvent(g.scan_event);
-    }
+    (void)InterlockedExchange(&g.scan_pending, 1);
+    ui_set_scanning(true);
+    (void)SetEvent(g.scan_event);
 }
 
 static void ui_stale_process(void)
@@ -518,20 +913,95 @@ static void ui_stale_process(void)
     ui_request_scan(false);
 }
 
+static void ui_reset_filter(void)
+{
+    if (g.filter == NULL) {
+        return;
+    }
+    (void)SendMessageW(g.filter, CB_RESETCONTENT, 0, 0);
+    if (g.view == CC_VIEW_PROCESSES) {
+        (void)SendMessageW(g.filter, CB_ADDSTRING, 0, (LPARAM)L"Todos los procesos");
+        (void)SendMessageW(g.filter, CB_ADDSTRING, 0, (LPARAM)L"Solo con alerta");
+        (void)SendMessageW(g.filter, CB_ADDSTRING, 0, (LPARAM)L"Sin alerta");
+    } else {
+        (void)SendMessageW(g.filter, CB_ADDSTRING, 0, (LPARAM)L"Todas las alertas");
+        (void)SendMessageW(g.filter, CB_ADDSTRING, 0, (LPARAM)L"Críticas");
+        (void)SendMessageW(g.filter, CB_ADDSTRING, 0, (LPARAM)L"Altas");
+        (void)SendMessageW(g.filter, CB_ADDSTRING, 0, (LPARAM)L"Medias");
+        (void)SendMessageW(g.filter, CB_ADDSTRING, 0, (LPARAM)L"Bajas");
+    }
+    g.filter_index = 0;
+    (void)SendMessageW(g.filter, CB_SETCURSEL, 0, 0);
+}
+
+static void ui_set_view(int view)
+{
+    if (view != CC_VIEW_ALERTS && view != CC_VIEW_PROCESSES) {
+        return;
+    }
+    g.view = view;
+    if (g.tabs != NULL) {
+        (void)SendMessageW(g.tabs, TCM_SETCURSEL, (WPARAM)view, 0);
+    }
+    if (g.list != NULL) {
+        ShowWindow(g.list, view == CC_VIEW_ALERTS ? SW_SHOW : SW_HIDE);
+    }
+    if (g.proc_list != NULL) {
+        ShowWindow(g.proc_list, view == CC_VIEW_PROCESSES ? SW_SHOW : SW_HIDE);
+    }
+    ui_reset_filter();
+    ui_fill_all();
+}
+
 static void ui_apply_scan_result(ui_scan_result_t *result)
 {
+    SYSTEMTIME now;
+
     if (result == NULL) {
         return;
     }
-    if (result->count >= 0 &&
-        InterlockedCompareExchange(&g.shutdown, 0, 0) == 0) {
-        free(g.rows);
-        g.rows = result->rows;
-        g.row_count = result->count;
-        ui_fill_list();
-        ui_update_status();
+    ui_set_scanning(false);
+    if (!result->ok || result->count < 0) {
+        MessageBoxW(NULL, L"No se pudo completar el análisis.",
+                    L"cleaner-secure", MB_OK | MB_ICONERROR);
+        ui_free_result(result);
         return;
     }
+    if (InterlockedCompareExchange(&g.shutdown, 0, 0) != 0) {
+        ui_free_result(result);
+        return;
+    }
+
+    GetLocalTime(&now);
+    swprintf(g.last_scan, sizeof(g.last_scan) / sizeof(g.last_scan[0]),
+             L"%02u:%02u:%02u", (unsigned)now.wHour, (unsigned)now.wMinute,
+             (unsigned)now.wSecond);
+
+    free(g.rows);
+    g.rows = result->rows;
+    g.row_count = result->count;
+    free(g.processes);
+    g.processes = result->processes;
+    g.process_count = result->process_count;
+    g.process_total = result->process_total;
+    g.analyzed = result->analyzed;
+    result->rows = NULL;
+    result->processes = NULL;
+
+    if (g.view == CC_VIEW_ALERTS) {
+        g.sort_column = 4;
+    } else {
+        g.sort_column = 6;
+    }
+    g.sort_desc = true;
+    if (g.view == CC_VIEW_ALERTS) {
+        qsort(g.rows, (size_t)g.row_count, sizeof(*g.rows), ui_compare_score);
+    } else {
+        qsort(g.processes, (size_t)g.process_count, sizeof(*g.processes),
+              ui_process_sort);
+    }
+    ui_fill_all();
+    ui_update_status();
     ui_free_result(result);
 }
 
@@ -539,7 +1009,8 @@ static void ui_show_detail(int index)
 {
     wchar_t category[64];
     wchar_t reason[CC_MAX_REASON * 2];
-    wchar_t text[CC_MAX_REASON * 2 + 256];
+    wchar_t indicator[128];
+    wchar_t text[CC_MAX_REASON * 2 + 320];
     const ui_row_t *row;
 
     if (index < 0 || index >= g.row_count) {
@@ -550,13 +1021,46 @@ static void ui_show_detail(int index)
                     sizeof(category) / sizeof(category[0]));
     ui_utf8_to_wide(row->alert.reason, reason,
                     sizeof(reason) / sizeof(reason[0]));
+    ui_wstr_copy(indicator, sizeof(indicator) / sizeof(indicator[0]),
+                 row->alert.indicator);
     swprintf(text, sizeof(text) / sizeof(text[0]),
              L"PID: %lu\nProceso: %s\nRiesgo: %s\nCategoría: %s\n"
-             L"Puntuación: %d\nCPU: %.1f%%\nRAM: %.1f MB\nMotivo: %s\nDestino: %s",
+             L"Puntuación: %d\nCPU: %.1f%%\nRAM: %.1f MB\nIndicador: %s\n"
+             L"Motivo: %s\nDestino: %s",
              (unsigned long)row->alert.pid, row->alert.target,
              ui_risk_name(row->alert.risk), category, row->score,
-             row->cpu, row->ram_mb, reason, row->alert.target);
+             row->cpu, row->ram_mb, indicator, reason, row->alert.target);
     MessageBoxW(NULL, text, L"Detalle de alerta", MB_OK | MB_ICONINFORMATION);
+}
+
+static void ui_show_process_detail(int index)
+{
+    const cc_process_view_t *view;
+    wchar_t text[2048];
+
+    if (index < 0 || index >= g.process_count) {
+        return;
+    }
+    view = &g.processes[index];
+    swprintf(text, sizeof(text) / sizeof(text[0]),
+             L"PID: %lu\nPadre: %lu\nProceso: %s\nUsuario: %s\nSesión: %lu\n"
+             L"Integridad: %s\nElevado: %s\nArquitectura: %s\n"
+             L"CPU: %.1f%%\nRAM: %.1f MB\nRuta: %s\nLínea de comandos: %s",
+             (unsigned long)view->info.pid,
+             (unsigned long)view->info.parent_pid, view->info.name,
+             view->info.user[0] != L'\0' ? view->info.user : L"desconocido",
+             (unsigned long)view->info.session_id,
+             cc_integrity_name(view->info.integrity),
+             view->info.is_elevated ? L"SÍ" : L"NO",
+             !view->info.bitness_known
+                 ? L"desconocida"
+                 : (view->info.is_wow64 ? L"32 bits (WOW64)" : L"64 bits"),
+             view->metrics.cpu_percent,
+             (double)view->metrics.working_set / 1048576.0,
+             view->info.path[0] != L'\0' ? view->info.path : L"no disponible",
+             view->info.command_line[0] != L'\0' ? view->info.command_line
+                                                 : L"no disponible");
+    MessageBoxW(NULL, text, L"Detalle de proceso", MB_OK | MB_ICONINFORMATION);
 }
 
 static void ui_run_as_admin(void)
@@ -572,7 +1076,7 @@ static void ui_run_as_admin(void)
         return;
     }
     result = (INT_PTR)ShellExecuteW(NULL, L"runas", path, NULL, NULL,
-                                   SW_SHOWNORMAL);
+                                    SW_SHOWNORMAL);
     if (result <= 32) {
         wchar_t err_text[256];
         ui_error_text(GetLastError(), err_text,
@@ -581,61 +1085,155 @@ static void ui_run_as_admin(void)
     }
 }
 
-static void ui_action(int command)
+static bool ui_selected_alert(uint32_t *pid, wchar_t target[CC_MAX_NAME],
+                              wchar_t indicator[64])
 {
+    HWND list;
     int selected;
-    DWORD error_code = 0;
-    wchar_t action[32];
-    bool ok = false;
+    LVITEMW item;
+    int index;
 
-    selected = (int)SendMessageW(g.list, LVM_GETNEXTITEM, (WPARAM)-1,
-                                 LVNI_SELECTED);
-    if (selected < 0 || selected >= g.row_count) {
-        MessageBoxW(NULL, L"Seleccione una alerta de la lista.",
-                    L"cleaner-secure", MB_OK | MB_ICONINFORMATION);
-        return;
+    if (g.view == CC_VIEW_PROCESSES) {
+        selected = (int)SendMessageW(g.proc_list, LVM_GETNEXTITEM, (WPARAM)-1,
+                                     LVNI_SELECTED);
+        if (selected < 0) {
+            MessageBoxW(NULL, L"Seleccione un proceso de la lista.",
+                        L"cleaner-secure", MB_OK | MB_ICONINFORMATION);
+            return false;
+        }
+        memset(&item, 0, sizeof(item));
+        item.mask = LVIF_PARAM;
+        item.iItem = selected;
+        if (!SendMessageW(g.proc_list, LVM_GETITEMW, 0, (LPARAM)&item)) {
+            return false;
+        }
+        index = (int)item.lParam;
+        if (index < 0 || index >= g.process_count) {
+            return false;
+        }
+        *pid = g.processes[index].info.pid;
+        for (index = 0; index < g.row_count; index++) {
+            if (g.rows[index].alert.pid == *pid) {
+                ui_wstr_copy(target, CC_MAX_NAME, g.rows[index].alert.target);
+                ui_wstr_copy(indicator, 64, g.rows[index].alert.indicator);
+                return true;
+            }
+        }
+        MessageBoxW(NULL, L"El proceso seleccionado no tiene una alerta "
+                          L"asociada.", L"cleaner-secure",
+                    MB_OK | MB_ICONINFORMATION);
+        return false;
     }
 
+    list = g.list;
+    selected = (int)SendMessageW(list, LVM_GETNEXTITEM, (WPARAM)-1,
+                                 LVNI_SELECTED);
+    if (selected < 0) {
+        MessageBoxW(NULL, L"Seleccione una alerta de la lista.",
+                    L"cleaner-secure", MB_OK | MB_ICONINFORMATION);
+        return false;
+    }
+    memset(&item, 0, sizeof(item));
+    item.mask = LVIF_PARAM;
+    item.iItem = selected;
+    if (!SendMessageW(list, LVM_GETITEMW, 0, (LPARAM)&item)) {
+        return false;
+    }
+    index = (int)item.lParam;
+    if (index < 0 || index >= g.row_count) {
+        return false;
+    }
+    *pid = g.rows[index].alert.pid;
+    ui_wstr_copy(target, CC_MAX_NAME, g.rows[index].alert.target);
+    ui_wstr_copy(indicator, 64, g.rows[index].alert.indicator);
+    return true;
+}
+
+static bool ui_confirm_action(const wchar_t *action, uint32_t pid,
+                              const wchar_t *target, const wchar_t *scope)
+{
+    wchar_t text[1024];
+    int rc;
+
+    swprintf(text, sizeof(text) / sizeof(text[0]),
+             L"%s\n\nPID: %lu\nObjetivo: %s\nDetalle: %s\n\n"
+             L"Esta acción quedará registrada en actions.log.",
+             action, (unsigned long)pid, target, scope);
+    rc = MessageBoxW(NULL, text, L"Confirmar acción",
+                     MB_OKCANCEL | MB_ICONWARNING | MB_DEFBUTTON2);
+    return rc == IDOK;
+}
+
+static void ui_action(int command)
+{
+    uint32_t pid = 0;
+    wchar_t target[CC_MAX_NAME];
+    wchar_t indicator[64];
+    wchar_t action[32];
+    wchar_t scope[CC_MAX_PATH_LEN];
+    DWORD error_code = 0;
+    bool ok = false;
+
+    if (!ui_selected_alert(&pid, target, indicator)) {
+        return;
+    }
     if (command == ID_BTN_BLOCK_IP || command == ID_BTN_UNBLOCK_IP) {
-        if (g.rows[selected].alert.indicator[0] == L'\0') {
+        if (indicator[0] == L'\0') {
             MessageBoxW(NULL, L"La alerta seleccionada no tiene una IP.",
                         L"cleaner-secure", MB_OK | MB_ICONINFORMATION);
             return;
         }
         if (command == ID_BTN_BLOCK_IP) {
-            ok = cc_block_ip(g.rows[selected].alert.indicator, &error_code);
             wcscpy(action, L"Bloquear IP");
+            wcscpy(scope, indicator);
         } else {
-            ok = cc_unblock_ip(g.rows[selected].alert.indicator, &error_code);
             wcscpy(action, L"Desbloquear IP");
+            wcscpy(scope, indicator);
+        }
+        if (!ui_confirm_action(action, pid, target, scope)) {
+            return;
+        }
+        if (command == ID_BTN_BLOCK_IP) {
+            ok = cc_block_ip(indicator, &error_code);
+        } else {
+            ok = cc_unblock_ip(indicator, &error_code);
         }
     } else {
-        if (g.rows[selected].alert.pid == 0) {
+        if (pid == 0) {
             MessageBoxW(NULL, L"La alerta seleccionada no tiene PID.",
                         L"cleaner-secure", MB_OK | MB_ICONINFORMATION);
             return;
         }
         switch (command) {
         case ID_BTN_KILL:
-            if (!cc_process_matches_name(g.rows[selected].alert.pid,
-                                         g.rows[selected].alert.target,
-                                         &error_code)) {
-                ui_stale_process();
-                return;
-            }
-            ok = cc_kill_process(g.rows[selected].alert.pid, &error_code);
             wcscpy(action, L"Terminar");
             break;
         case ID_BTN_SUSPEND:
-            ok = cc_suspend_process(g.rows[selected].alert.pid, &error_code);
             wcscpy(action, L"Suspender");
             break;
         case ID_BTN_RESUME:
-            ok = cc_resume_process(g.rows[selected].alert.pid, &error_code);
             wcscpy(action, L"Reanudar");
             break;
         default:
             return;
+        }
+        ui_wstr_copy(scope, CC_MAX_PATH_LEN, indicator);
+        if (scope[0] == L'\0') {
+            ui_wstr_copy(scope, CC_MAX_PATH_LEN, target);
+        }
+        if (!ui_confirm_action(action, pid, target, scope)) {
+            return;
+        }
+        if (command == ID_BTN_KILL) {
+            if (!cc_process_matches_name(pid, target, &error_code)) {
+                ui_stale_process();
+                return;
+            }
+            ok = cc_kill_process(pid, &error_code);
+        } else if (command == ID_BTN_SUSPEND) {
+            ok = cc_suspend_process(pid, &error_code);
+        } else {
+            ok = cc_resume_process(pid, &error_code);
         }
     }
     if (!ok && command == ID_BTN_KILL &&
@@ -659,9 +1257,13 @@ static void ui_action(int command)
 
 static void ui_layout(int width, int height)
 {
-    static const int fixed_widths[] = { 80, 220, 80, 100, 90, 120 };
+    static const int alert_widths[] = { 80, 220, 80, 100, 90, 120 };
+    static const int proc_widths[] = { 80, 200, 180, 80, 80, 80, 100, 110, 260 };
     const int gap = 6;
     const int margin = 8;
+    const int filter_row_y = 38;
+    const int list_y = 68;
+    const int bottom_reserved = 122;
     LVCOLUMNW col;
     HWND buttons[8];
     int count = 0;
@@ -669,22 +1271,29 @@ static void ui_layout(int width, int height)
     int list_h;
     int button_w;
     int last_w;
+    int widths_count;
+    const int *widths;
     int i;
 
-    if (width < 560) {
-        width = 560;
+    if (width < 640) {
+        width = 640;
     }
-    if (height < 300) {
-        height = 300;
+    if (height < 420) {
+        height = 420;
     }
     list_w = width - margin * 2;
-    list_h = height - 130;
-    if (list_h < 80) {
-        list_h = 80;
+    list_h = height - list_y - bottom_reserved;
+    if (list_h < 100) {
+        list_h = 100;
     }
-    MoveWindow(g.list, margin, margin, list_w, list_h, TRUE);
 
-    MoveWindow(g.chk_auto, margin, margin + list_h + 8, 150, 22, TRUE);
+    MoveWindow(g.tabs, margin, margin, list_w, 26, TRUE);
+    MoveWindow(g.search, margin, filter_row_y, 260, 22, TRUE);
+    MoveWindow(g.filter, margin + 268, filter_row_y, 200, 22, TRUE);
+    MoveWindow(g.list, margin, list_y, list_w, list_h, TRUE);
+    MoveWindow(g.proc_list, margin, list_y, list_w, list_h, TRUE);
+    MoveWindow(g.progress, margin, list_y + list_h + 6, list_w, 14, TRUE);
+    MoveWindow(g.chk_auto, margin, list_y + list_h + 24, 150, 22, TRUE);
 
     buttons[count++] = g.btn_scan;
     buttons[count++] = g.btn_kill;
@@ -706,17 +1315,25 @@ static void ui_layout(int width, int height)
     }
     MoveWindow(g.status, margin, height - 28, list_w, 24, TRUE);
 
-    last_w = list_w - 24;
-    for (i = 0; i < 6; i++) {
-        last_w -= fixed_widths[i];
+    if (g.view == CC_VIEW_PROCESSES) {
+        widths = proc_widths;
+        widths_count = (int)(sizeof(proc_widths) / sizeof(proc_widths[0]));
+    } else {
+        widths = alert_widths;
+        widths_count = (int)(sizeof(alert_widths) / sizeof(alert_widths[0]));
     }
-    if (last_w < 160) {
-        last_w = 160;
+    last_w = list_w - 24;
+    for (i = 0; i < widths_count; i++) {
+        last_w -= widths[i];
+    }
+    if (last_w < 140) {
+        last_w = 140;
     }
     memset(&col, 0, sizeof(col));
     col.mask = LVCF_WIDTH;
     col.cx = last_w;
-    (void)SendMessageW(g.list, LVM_SETCOLUMNW, (WPARAM)CC_COL_REASON,
+    (void)SendMessageW(g.view == CC_VIEW_PROCESSES ? g.proc_list : g.list,
+                       LVM_SETCOLUMNW, (WPARAM)(CC_PROC_COL_COUNT - 1),
                        (LPARAM)&col);
 }
 
@@ -729,12 +1346,29 @@ static HWND ui_create_button(HWND parent, int id, const wchar_t *text, int x,
                            GetModuleHandleW(NULL), NULL);
 }
 
+static bool ui_create_columns(HWND list, const ui_column_def_t *columns,
+                              size_t count)
+{
+    LVCOLUMNW col;
+    size_t i;
+
+    for (i = 0; i < count; i++) {
+        memset(&col, 0, sizeof(col));
+        col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
+        col.fmt = LVCFMT_LEFT;
+        col.cx = columns[i].width;
+        col.iSubItem = (int)i;
+        col.pszText = (LPWSTR)columns[i].text;
+        if (SendMessageW(list, LVM_INSERTCOLUMNW, (WPARAM)i, (LPARAM)&col) < 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 static bool ui_create_controls(HWND hwnd)
 {
-    static const struct {
-        const wchar_t *text;
-        int width;
-    } columns[] = {
+    static const ui_column_def_t alert_columns[] = {
         { L"PID", 80 },
         { L"Proceso", 220 },
         { L"CPU%", 80 },
@@ -743,35 +1377,94 @@ static bool ui_create_controls(HWND hwnd)
         { L"Categoría", 120 },
         { L"Motivo", 300 }
     };
-    LVCOLUMNW col;
+    static const ui_column_def_t process_columns[] = {
+        { L"PID", 80 },
+        { L"Proceso", 200 },
+        { L"Usuario", 180 },
+        { L"Sesión", 80 },
+        { L"Padre", 80 },
+        { L"CPU%", 80 },
+        { L"RAM(MB)", 100 },
+        { L"Integridad", 110 },
+        { L"Ruta", 260 }
+    };
+    TCITEMW tab;
     DWORD ex_style;
-    size_t i;
+    int i;
 
     g.font = (HFONT)GetStockObject(DEFAULT_GUI_FONT);
+
+    g.tabs = CreateWindowExW(0, WC_TABCONTROLW, L"",
+                             WS_CHILD | WS_VISIBLE | TCS_TOP,
+                             8, 8, 1084, 26, hwnd, (HMENU)(INT_PTR)ID_TABS,
+                             GetModuleHandleW(NULL), NULL);
+    if (g.tabs == NULL) {
+        return false;
+    }
+    (void)SendMessageW(g.tabs, WM_SETFONT, (WPARAM)g.font, TRUE);
+    for (i = 0; i < 2; i++) {
+        memset(&tab, 0, sizeof(tab));
+        tab.mask = TCIF_TEXT;
+        tab.pszText = i == 0 ? (LPWSTR)L"Alertas" : (LPWSTR)L"Procesos";
+        if (SendMessageW(g.tabs, TCM_INSERTITEMW, (WPARAM)i, (LPARAM)&tab) < 0) {
+            return false;
+        }
+    }
+
+    g.search = CreateWindowExW(WS_EX_CLIENTEDGE, L"Edit", L"",
+                               WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+                               ES_AUTOHSCROLL,
+                               8, 38, 260, 22, hwnd,
+                               (HMENU)(INT_PTR)ID_SEARCH,
+                               GetModuleHandleW(NULL), NULL);
+    g.filter = CreateWindowExW(0, L"ComboBox", L"",
+                               WS_CHILD | WS_VISIBLE | WS_TABSTOP |
+                               CBS_DROPDOWNLIST | WS_VSCROLL,
+                               276, 38, 200, 180, hwnd,
+                               (HMENU)(INT_PTR)ID_FILTER,
+                               GetModuleHandleW(NULL), NULL);
+    if (g.search == NULL || g.filter == NULL) {
+        return false;
+    }
+    (void)SendMessageW(g.search, WM_SETFONT, (WPARAM)g.font, TRUE);
+    (void)SendMessageW(g.filter, WM_SETFONT, (WPARAM)g.font, TRUE);
 
     g.list = CreateWindowExW(0, WC_LISTVIEWW, L"",
                              WS_CHILD | WS_VISIBLE | WS_BORDER |
                              LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
-                             8, 8, 1084, 570, hwnd, (HMENU)(INT_PTR)ID_LIST,
+                             8, 68, 1084, 490, hwnd, (HMENU)(INT_PTR)ID_LIST,
                              GetModuleHandleW(NULL), NULL);
-    if (g.list == NULL) {
+    g.proc_list = CreateWindowExW(0, WC_LISTVIEWW, L"",
+                                  WS_CHILD | WS_BORDER |
+                                  LVS_REPORT | LVS_SINGLESEL | LVS_SHOWSELALWAYS,
+                                  8, 68, 1084, 490, hwnd,
+                                  (HMENU)(INT_PTR)ID_PROC_LIST,
+                                  GetModuleHandleW(NULL), NULL);
+    if (g.list == NULL || g.proc_list == NULL) {
         return false;
     }
-    ex_style = LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES;
+    ex_style = LVS_EX_FULLROWSELECT | LVS_EX_GRIDLINES | LVS_EX_DOUBLEBUFFER;
     (void)SendMessageW(g.list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, (LPARAM)ex_style);
+    (void)SendMessageW(g.proc_list, LVM_SETEXTENDEDLISTVIEWSTYLE, 0, (LPARAM)ex_style);
     (void)SendMessageW(g.list, WM_SETFONT, (WPARAM)g.font, TRUE);
+    (void)SendMessageW(g.proc_list, WM_SETFONT, (WPARAM)g.font, TRUE);
 
-    for (i = 0; i < sizeof(columns) / sizeof(columns[0]); i++) {
-        memset(&col, 0, sizeof(col));
-        col.mask = LVCF_TEXT | LVCF_WIDTH | LVCF_SUBITEM;
-        col.fmt = LVCFMT_LEFT;
-        col.cx = columns[i].width;
-        col.iSubItem = (int)i;
-        col.pszText = (LPWSTR)columns[i].text;
-        if (SendMessageW(g.list, LVM_INSERTCOLUMNW, (WPARAM)i, (LPARAM)&col) < 0) {
-            return false;
-        }
+    if (!ui_create_columns(g.list, alert_columns,
+                           sizeof(alert_columns) / sizeof(alert_columns[0])) ||
+        !ui_create_columns(g.proc_list, process_columns,
+                           sizeof(process_columns) / sizeof(process_columns[0]))) {
+        return false;
     }
+
+    g.progress = CreateWindowExW(0, PROGRESS_CLASSW, L"",
+                                 WS_CHILD | WS_VISIBLE | PBS_MARQUEE,
+                                 8, 564, 1084, 14, hwnd,
+                                 (HMENU)(INT_PTR)ID_PROGRESS,
+                                 GetModuleHandleW(NULL), NULL);
+    if (g.progress == NULL) {
+        return false;
+    }
+    (void)SendMessageW(g.progress, PBM_SETMARQUEE, FALSE, 0);
 
     g.chk_auto = CreateWindowExW(0, L"Button", L"Auto-refresco",
                                  WS_CHILD | WS_VISIBLE | WS_TABSTOP |
@@ -780,19 +1473,19 @@ static bool ui_create_controls(HWND hwnd)
                                  (HMENU)(INT_PTR)ID_CHK_AUTO,
                                  GetModuleHandleW(NULL), NULL);
     g.btn_scan = ui_create_button(hwnd, ID_BTN_SCAN, L"Analizar ahora", 8, 618,
-                                   130, 28);
+                                  130, 28);
     g.btn_kill = ui_create_button(hwnd, ID_BTN_KILL, L"Terminar", 146, 618,
-                                   120, 28);
+                                  120, 28);
     g.btn_suspend = ui_create_button(hwnd, ID_BTN_SUSPEND, L"Suspender", 274,
-                                      618, 120, 28);
+                                     618, 120, 28);
     g.btn_resume = ui_create_button(hwnd, ID_BTN_RESUME, L"Reanudar", 402, 618,
-                                     120, 28);
+                                    120, 28);
     g.btn_block_ip = ui_create_button(hwnd, ID_BTN_BLOCK_IP, L"Bloquear IP",
-                                       530, 618, 130, 28);
+                                      530, 618, 130, 28);
     g.btn_unblock_ip = ui_create_button(hwnd, ID_BTN_UNBLOCK_IP,
-                                         L"Desbloquear IP", 668, 618, 140, 28);
+                                        L"Desbloquear IP", 668, 618, 140, 28);
     g.btn_elev = ui_create_button(hwnd, ID_BTN_ELEV, L"Elevación", 816, 618,
-                                   120, 28);
+                                  120, 28);
     if (!g.elevated) {
         g.btn_runas = ui_create_button(hwnd, ID_BTN_RUNAS,
                                        L"Reiniciar como administrador",
@@ -824,6 +1517,8 @@ static bool ui_create_controls(HWND hwnd)
     }
     (void)SendMessageW(g.status, WM_SETFONT, (WPARAM)g.font, TRUE);
     (void)SendMessageW(g.chk_auto, BM_SETCHECK, BST_CHECKED, 0);
+    wcscpy(g.last_scan, L"--:--:--");
+    ui_set_view(CC_VIEW_ALERTS);
     return true;
 }
 
@@ -859,8 +1554,10 @@ static bool ui_init_state(void)
     }
     g.metrics = cc_metrics_create();
     g.view_metrics = cc_metrics_create();
+    g.inventory_metrics = cc_metrics_create();
     g.cache = cc_trust_cache_create();
-    if (g.metrics == NULL || g.view_metrics == NULL || g.cache == NULL) {
+    if (g.metrics == NULL || g.view_metrics == NULL ||
+        g.inventory_metrics == NULL || g.cache == NULL) {
         return false;
     }
     return true;
@@ -869,9 +1566,13 @@ static bool ui_init_state(void)
 static void ui_free_state(void)
 {
     free(g.rows);
+    free(g.processes);
     g.rows = NULL;
+    g.processes = NULL;
     g.row_count = 0;
+    g.process_count = 0;
     cc_trust_cache_free(g.cache);
+    cc_metrics_destroy(g.inventory_metrics);
     cc_metrics_destroy(g.view_metrics);
     cc_metrics_destroy(g.metrics);
     cc_publishers_free(g.pubs);
@@ -923,8 +1624,8 @@ static LRESULT CALLBACK ui_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam,
             case ID_BTN_ELEV:
                 if (g.elevated) {
                     MessageBoxW(NULL, L"El proceso se ejecuta con privilegios "
-                                L"de administrador.", L"Elevación",
-                                MB_OK | MB_ICONINFORMATION);
+                                 L"de administrador.", L"Elevación",
+                                 MB_OK | MB_ICONINFORMATION);
                 } else {
                     ui_run_as_admin();
                 }
@@ -935,15 +1636,70 @@ static LRESULT CALLBACK ui_wnd_proc(HWND hwnd, UINT msg, WPARAM wParam,
             default:
                 break;
             }
+        } else if (HIWORD(wParam) == EN_CHANGE &&
+                   LOWORD(wParam) == ID_SEARCH) {
+            (void)GetWindowTextW(g.search, g.search_text,
+                                 sizeof(g.search_text) / sizeof(g.search_text[0]));
+            ui_fill_all();
+        } else if (HIWORD(wParam) == CBN_SELCHANGE &&
+                   LOWORD(wParam) == ID_FILTER) {
+            g.filter_index = (int)SendMessageW(g.filter, CB_GETCURSEL, 0, 0);
+            if (g.filter_index < 0) {
+                g.filter_index = 0;
+            }
+            ui_fill_all();
         }
         return 0;
 
     case WM_NOTIFY: {
         NMHDR *header = (NMHDR *)lParam;
-        if (header != NULL && header->idFrom == ID_LIST &&
-            header->code == NM_DBLCLK) {
+
+        if (header == NULL) {
+            return 0;
+        }
+        if (header->idFrom == ID_TABS && header->code == TCN_SELCHANGE) {
+            ui_set_view((int)SendMessageW(g.tabs, TCM_GETCURSEL, 0, 0));
+            return 0;
+        }
+        if (header->code == LVN_COLUMNCLICK &&
+            (header->idFrom == ID_LIST || header->idFrom == ID_PROC_LIST)) {
+            NMLISTVIEW *view = (NMLISTVIEW *)header;
+
+            if (g.sort_column == view->iSubItem) {
+                g.sort_desc = !g.sort_desc;
+            } else {
+                g.sort_column = view->iSubItem;
+                g.sort_desc = true;
+            }
+            if (header->idFrom == ID_LIST) {
+                qsort(g.rows, (size_t)g.row_count, sizeof(*g.rows),
+                      ui_row_sort);
+            } else {
+                qsort(g.processes, (size_t)g.process_count,
+                      sizeof(*g.processes), ui_process_sort);
+            }
+            ui_fill_all();
+            return 0;
+        }
+        if (header->code == NM_DBLCLK) {
             NMITEMACTIVATE *activate = (NMITEMACTIVATE *)header;
-            ui_show_detail(activate->iItem);
+            if (header->idFrom == ID_LIST) {
+                LVITEMW item;
+                memset(&item, 0, sizeof(item));
+                item.mask = LVIF_PARAM;
+                item.iItem = activate->iItem;
+                if (SendMessageW(g.list, LVM_GETITEMW, 0, (LPARAM)&item)) {
+                    ui_show_detail((int)item.lParam);
+                }
+            } else if (header->idFrom == ID_PROC_LIST) {
+                LVITEMW item;
+                memset(&item, 0, sizeof(item));
+                item.mask = LVIF_PARAM;
+                item.iItem = activate->iItem;
+                if (SendMessageW(g.proc_list, LVM_GETITEMW, 0, (LPARAM)&item)) {
+                    ui_show_process_detail((int)item.lParam);
+                }
+            }
         }
         return 0;
     }
@@ -970,6 +1726,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
 {
     static const wchar_t *const class_name = L"CleanerSecureWindow";
     WNDCLASSEXW wc;
+    INITCOMMONCONTROLSEX icc;
     HWND hwnd;
     MSG msg;
     int screen_w;
@@ -980,10 +1737,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     (void)hPrevInstance;
     (void)lpCmdLine;
 
-    INITCOMMONCONTROLSEX icc;
     memset(&icc, 0, sizeof(icc));
     icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_LISTVIEW_CLASSES;
+    icc.dwICC = ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES | ICC_PROGRESS_CLASS;
     (void)InitCommonControlsEx(&icc);
 
     memset(&wc, 0, sizeof(wc));

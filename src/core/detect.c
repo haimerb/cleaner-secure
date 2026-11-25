@@ -306,12 +306,20 @@ int cc_detect_processes(const cc_detect_ctx_t *ctx, cc_alert_t *out, int cap,
             if (count >= cap) break;
         }
 
-        if (ctx->ioc != NULL && cc_ioc_match_proc(ctx->ioc, p->name, p->path, NULL)) {
-            char nbuf[CC_MAX_NAME];
-            cc_wide_to_utf8(p->name, nbuf, sizeof(nbuf));
-            snprintf(reason, sizeof(reason), "IOC process match: %s", nbuf[0] ? nbuf : "unknown");
-            push_alert(out, cap, &count, CC_RISK_CRITICAL, "ioc", target, p->pid, reason);
-            if (count >= cap) break;
+        if (ctx->ioc != NULL) {
+            char hash[65] = {0};
+
+            if (cc_ioc_has_hashes(ctx->ioc) && p->path[0] != L'\0' &&
+                GetTickCount64() < deadline) {
+                (void)cc_hash_sha256_file(p->path, hash);
+            }
+            if (cc_ioc_match_proc(ctx->ioc, p->name, p->path, hash)) {
+                char nbuf[CC_MAX_NAME];
+                cc_wide_to_utf8(p->name, nbuf, sizeof(nbuf));
+                snprintf(reason, sizeof(reason), "IOC process match: %s", nbuf[0] ? nbuf : "unknown");
+                push_alert(out, cap, &count, CC_RISK_CRITICAL, "ioc", target, p->pid, reason);
+                if (count >= cap) break;
+            }
         }
 
         if (ctx->ioc != NULL) {
